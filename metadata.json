@@ -1,0 +1,10 @@
+{
+  "name": "VerifyBeforeBuy AI",
+  "description": "AI-assisted online shopping risk assessment and consumer safety platform. Check websites, product listings, sellers, and barcodes with transparent risk scores and safety recommendations.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
