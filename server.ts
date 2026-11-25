@@ -10,6 +10,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { RiskScoringEngine } from './src/lib/riskEngine/engine.ts';
+import { predictPhishing, getModelMetadata } from './src/lib/mlInference.ts';
+import { predictProductRisk, getProductModelMetadata } from './src/lib/productMlInference.ts';
+import { validateWebsiteUrl } from './src/lib/urlValidator.ts';
 import { AssessmentResult, WebsiteAnalysisInput, ProductAnalysisInput, CodeAnalysisInput } from './src/types/index.ts';
 
 dotenv.config();
@@ -83,8 +86,11 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
+// ML Phishing Service Configuration (Points to separate Python FastAPI microservice)
+const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://127.0.0.1:8000';
+
 // 2. Website Analysis Endpoint
-app.post('/api/analyze/website', (req: Request, res: Response) => {
+app.post('/api/analyze/website', async (req: Request, res: Response) => {
   try {
     const input: WebsiteAnalysisInput = req.body;
     if (!input || !input.url || typeof input.url !== 'string') {
@@ -92,27 +98,91 @@ app.post('/api/analyze/website', (req: Request, res: Response) => {
       return;
     }
 
-    let parsed: URL;
-    try {
-      const sanitized = input.url.trim().startsWith('http') ? input.url.trim() : 'https://' + input.url.trim();
-      parsed = new URL(sanitized);
-    } catch {
-      res.status(400).json({ error: 'Invalid URL format.' });
+    const validation = validateWebsiteUrl(input.url);
+    if (!validation.valid || !validation.hostname || !validation.normalizedUrl) {
+      res.status(400).json({ error: validation.error || 'Invalid URL. Please enter a valid website address.' });
       return;
     }
 
-    if (isRestrictedHost(parsed.hostname)) {
+    if (isRestrictedHost(validation.hostname)) {
       res.status(403).json({
         error: 'Security restriction: Private, loopback, or metadata endpoints are blocked.',
       });
       return;
     }
 
-    const result = RiskScoringEngine.assessWebsite(input);
+    const result = RiskScoringEngine.assessWebsite({
+      ...input,
+      url: validation.normalizedUrl,
+    });
     res.json(result);
   } catch (error: any) {
     console.error('Website analysis error:', error);
     res.status(500).json({ error: error.message || 'Analysis failed.' });
+  }
+});
+
+// Dedicated ML Phishing Prediction Endpoint (Trained on malicious_phish.csv dataset)
+app.post('/api/ml/predict-phishing', async (req: Request, res: Response) => {
+  try {
+    const { url } = req.body;
+    if (!url || typeof url !== 'string') {
+      res.status(400).json({ error: 'Valid URL is required.' });
+      return;
+    }
+
+    const validation = validateWebsiteUrl(url);
+    if (!validation.valid || !validation.hostname || !validation.normalizedUrl) {
+      res.status(400).json({ error: validation.error || 'Invalid URL structure.' });
+      return;
+    }
+
+    if (isRestrictedHost(validation.hostname)) {
+      res.status(403).json({ error: 'Restricted host cannot be evaluated.' });
+      return;
+    }
+
+    // Run inference with the model trained on the Kaggle malicious_phish.csv dataset
+    const prediction = predictPhishing(validation.normalizedUrl);
+    res.json(prediction);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'ML prediction failed.' });
+  }
+});
+
+// ML Model Metadata & Training Metrics Endpoint
+app.get('/api/ml/model-info', (_req: Request, res: Response) => {
+  try {
+    const metadata = getModelMetadata();
+    res.json(metadata);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Could not retrieve model info' });
+  }
+});
+
+// Dedicated ML Product Listing Risk Prediction Endpoint
+app.post('/api/ml/predict-product', (req: Request, res: Response) => {
+  try {
+    const input: ProductAnalysisInput = req.body;
+    if (!input || !input.productName || typeof input.productName !== 'string') {
+      res.status(400).json({ error: 'Product name is required.' });
+      return;
+    }
+
+    const prediction = predictProductRisk(input);
+    res.json(prediction);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Product ML prediction failed.' });
+  }
+});
+
+// Product ML Model Metadata & Metrics Endpoint
+app.get('/api/ml/product-model-info', (_req: Request, res: Response) => {
+  try {
+    const metadata = getProductModelMetadata();
+    res.json(metadata);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Could not retrieve product model info' });
   }
 });
 
@@ -279,7 +349,10 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🛡️  VerifyBeforeBuy AI Server active at http://0.0.0.0:${PORT} [mode: ${isProd ? 'prod' : 'dev'}]`);
+    console.log(`\n🛡️  VerifyBeforeBuy AI — Server is active and listening!`);
+    console.log(`👉 Local:   http://localhost:${PORT}`);
+    console.log(`👉 Network: http://127.0.0.1:${PORT}`);
+    console.log(`📦 Mode:    ${isProd ? 'production' : 'development'}\n`);
   });
 }
 

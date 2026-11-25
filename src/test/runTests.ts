@@ -4,6 +4,7 @@
  */
 
 import { RiskScoringEngine } from '../lib/riskEngine/engine';
+import { validateWebsiteUrl } from '../lib/urlValidator';
 
 interface TestCase {
   name: string;
@@ -114,6 +115,74 @@ const tests: TestCase[] = [
           validScore: validResult.score,
           tamperedScore: tamperedResult.score,
         },
+      };
+    },
+  },
+
+  {
+    name: 'Rule 6: Invalid URLs (kajsbdche, hello123, abc, www, https://, ftp://) fail validation without invoking ML; valid URLs (including suspicious domains) pass',
+    run: () => {
+      const cases: Array<{ input: string; expectedValid: boolean }> = [
+        { input: '', expectedValid: false },
+        { input: 'kajsbdche', expectedValid: false },
+        { input: 'hello123', expectedValid: false },
+        { input: 'abc', expectedValid: false },
+        { input: 'www', expectedValid: false },
+        { input: 'https://', expectedValid: false },
+        { input: 'randomtext', expectedValid: false },
+        { input: 'ftp://example.com', expectedValid: false },
+        { input: 'google.com', expectedValid: true },
+        { input: 'https://google.com', expectedValid: true },
+        { input: 'http://example.com/login', expectedValid: true },
+        { input: 'https://suspicious-example.xyz', expectedValid: true },
+        { input: 'https://fake-login-example.xyz/verify', expectedValid: true },
+      ];
+
+      const failures: string[] = [];
+      for (const tc of cases) {
+        const res = validateWebsiteUrl(tc.input);
+        if (res.valid !== tc.expectedValid) {
+          failures.push(`${tc.input}: expected valid=${tc.expectedValid}, got ${res.valid}`);
+        }
+        if (!tc.expectedValid && tc.input.trim().length > 0) {
+          const directEngine = RiskScoringEngine.assessWebsite({ url: tc.input });
+          if (directEngine.mlPhishingPrediction !== undefined) {
+            failures.push(`${tc.input}: ML model unexpectedly ran on invalid URL`);
+          }
+          if (directEngine.score <= 25) {
+            failures.push(`${tc.input}: engine unexpectedly scored invalid URL as Low Risk (${directEngine.score})`);
+          }
+        }
+      }
+
+      return {
+        passed: failures.length === 0,
+        message: failures.length === 0 ? `All ${cases.length} URL validation & ML-skip assertions passed.` : failures.join('; '),
+      };
+    },
+  },
+
+  {
+    name: 'Rule 7: Trained Product ML model classifies high-risk replica listing vs clean listing',
+    run: () => {
+      const risky = RiskScoringEngine.assessProduct({
+        productName: 'Rolex Submariner Date 41mm',
+        brand: 'Rolex',
+        listingUrl: 'https://luxury-outlet-deals.xyz/item/sub41',
+        listedPrice: 199,
+        referencePrice: 10250,
+        sellerName: 'deals_king_99',
+        sellerRating: 2.1,
+        hasReturnPolicy: false,
+        productDescription: 'Brand new 1:1 replica mirror copy. Western Union or wire transfer only.',
+      });
+
+      const hasMlPrediction = Boolean(risky.mlProductPrediction && risky.mlProductPrediction.modelTrained);
+      const predictedHighRisk = Boolean(risky.mlProductPrediction?.isHighRisk) && risky.score >= 60;
+
+      return {
+        passed: hasMlPrediction && predictedHighRisk,
+        message: `Product ML prob=${risky.mlProductPrediction?.probability}, finalScore=${risky.score} (${risky.category})`,
       };
     },
   },

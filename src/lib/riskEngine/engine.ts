@@ -19,6 +19,8 @@ import { getRiskCategory, COMMON_DISCLAIMER } from './rules';
 import { analyzeUrlStructure } from './urlAnalyzer';
 import { analyzeProductListing } from './productAnalyzer';
 import { analyzeCodePayload } from './codeAnalyzer';
+import { predictPhishing } from '../mlInference';
+import { predictProductRisk } from '../productMlInference';
 
 export class RiskScoringEngine {
   /**
@@ -26,6 +28,36 @@ export class RiskScoringEngine {
    */
   public static assessWebsite(input: WebsiteAnalysisInput): AssessmentResult {
     const analysis = analyzeUrlStructure(input.url);
+    const hasInvalidSyntax = analysis.indicators.some(
+      (i) => i.id === 'invalid-url-format' || i.id === 'unsafe-protocol'
+    );
+
+    const mlPred = hasInvalidSyntax ? undefined : predictPhishing(input.url);
+
+    // If trained ML model predicts high phishing risk, reflect it in indicators
+    if (mlPred && mlPred.isPhishing && mlPred.probability >= 0.60) {
+      analysis.indicators.push({
+        id: 'ml_phishing_high_risk',
+        name: `ML Model Phishing Alert (${Math.round(mlPred.probability * 100)}% Probability)`,
+        category: 'technical',
+        severity: mlPred.probability >= 0.85 ? 'high' : 'medium',
+        scoreImpact: Math.round(mlPred.probability * 25),
+        isObserved: true,
+        description: `Supervised classification model trained on 80,000 real-world malicious and legitimate URLs classified this URL structure as malicious with ${Math.round(mlPred.probability * 100)}% probability.`,
+        remedyOrPrecaution: 'Do not enter passwords, credit cards, or personal credentials on this domain. Check the domain spelling carefully.',
+      });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 20);
+    } else if (mlPred && !mlPred.isPhishing && mlPred.probability <= 0.30) {
+      analysis.positiveSignals.push({
+        id: 'ml_benign_classification',
+        name: `ML Model Clean Profile (${Math.round((1 - mlPred.probability) * 100)}% Benign Confidence)`,
+        description: `Trained machine learning classifier found no anomalous lexical or deception markers in the URL pattern.`,
+        isVerified: true,
+        scoreDeduction: 15,
+      });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+    }
+
     const score = this.calculateFinalScore(analysis.indicators, analysis.positiveSignals);
     const confidence = this.calculateConfidence(analysis.evidenceWeight);
     const category = getRiskCategory(score);
@@ -48,6 +80,7 @@ export class RiskScoringEngine {
       positiveSignals: analysis.positiveSignals,
       recommendations,
       unverifiedAspects: analysis.unverifiedAspects,
+      mlPhishingPrediction: mlPred,
       disclaimer: COMMON_DISCLAIMER,
     };
   }
@@ -57,6 +90,7 @@ export class RiskScoringEngine {
    */
   public static assessProduct(input: ProductAnalysisInput): AssessmentResult {
     const analysis = analyzeProductListing(input);
+    const mlProductPred = predictProductRisk(input);
 
     // If a listing URL is provided, also check its URL features
     if (input.listingUrl && input.listingUrl.trim().length > 0) {
@@ -65,6 +99,30 @@ export class RiskScoringEngine {
       analysis.positiveSignals.push(...urlAnalysis.positiveSignals);
       analysis.evidenceWeight = Math.min(analysis.evidenceWeight + 20, 100);
       analysis.unverifiedAspects.push(...urlAnalysis.unverifiedAspects);
+    }
+
+    // Integrate trained Product ML risk prediction when sufficient input evidence exists
+    if (mlProductPred.isHighRisk && mlProductPred.probability >= 0.65 && analysis.evidenceWeight >= 30) {
+      analysis.indicators.push({
+        id: 'ml_product_high_risk',
+        name: `ML Product Risk Alert (${Math.round(mlProductPred.probability * 100)}% Risk Probability)`,
+        category: 'verification',
+        severity: mlProductPred.probability >= 0.85 ? 'high' : 'medium',
+        scoreImpact: Math.round(mlProductPred.probability * 22),
+        isObserved: true,
+        description: `Supervised Logistic Regression model trained on 10,000 labeled product listings flagged combined pricing, seller, and description risk markers (${Math.round(mlProductPred.probability * 100)}% probability).`,
+        remedyOrPrecaution: 'Verify seller authorization, demand buyer-protected checkout, and cross-check manufacturer serials.',
+      });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+    } else if (!mlProductPred.isHighRisk && mlProductPred.probability <= 0.30 && analysis.evidenceWeight >= 35) {
+      analysis.positiveSignals.push({
+        id: 'ml_product_benign_classification',
+        name: `ML Product Listing Clean Profile (${Math.round((1 - mlProductPred.probability) * 100)}% Lower-Risk Confidence)`,
+        description: 'Trained product listing classifier evaluated price context, seller signals, and return terms as consistent with lower-risk listings.',
+        isVerified: true,
+        scoreDeduction: 12,
+      });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
     }
 
     const score = this.calculateFinalScore(analysis.indicators, analysis.positiveSignals);
@@ -94,6 +152,7 @@ export class RiskScoringEngine {
       positiveSignals: analysis.positiveSignals,
       recommendations,
       unverifiedAspects: Array.from(new Set(analysis.unverifiedAspects)),
+      mlProductPrediction: mlProductPred,
       disclaimer: COMMON_DISCLAIMER,
     };
   }

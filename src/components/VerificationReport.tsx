@@ -15,6 +15,8 @@ import {
   Copy,
   RotateCcw,
   FileCheck2,
+  Cpu,
+  Layers,
 } from 'lucide-react';
 import { AssessmentResult } from '../types';
 import { ApiService } from '../lib/api';
@@ -240,6 +242,285 @@ Disclaimer: ${result.disclaimer}`;
           </div>
         </div>
       </div>
+
+      {/* Machine Learning Phishing Classification Card (for website assessments) */}
+      {result.type === 'website' && (
+        <div className="p-6 bg-slate-900 text-white rounded-2xl space-y-5 shadow-xl border border-slate-800">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-indigo-500/20 text-indigo-400 rounded-xl border border-indigo-500/30">
+                <Cpu className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="font-bold text-sm text-white">Machine Learning Phishing Detector</h4>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-500/20 text-emerald-300 border-emerald-500/30 font-semibold flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Trained on malicious_phish.csv (80,000 URLs)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Supervised Logistic Classification evaluating 18 lexical &amp; structural indicators.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 bg-slate-800/90 px-4 py-2.5 rounded-xl border border-slate-700/80 self-start sm:self-auto">
+              <div className="text-right">
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-medium">
+                  Model Prediction
+                </span>
+                <span
+                  className={`text-sm font-bold ${
+                    (result.mlPhishingPrediction?.probability ?? result.score / 100) >= 0.5
+                      ? 'text-rose-400'
+                      : 'text-emerald-400'
+                  }`}
+                >
+                  {(result.mlPhishingPrediction?.probability ?? result.score / 100) >= 0.5
+                    ? 'Phishing / Malicious Risk'
+                    : 'Legitimate / Benign Pattern'}
+                </span>
+              </div>
+              <div className="text-2xl font-mono font-extrabold text-white">
+                {Math.round((result.mlPhishingPrediction?.probability ?? result.score / 100) * 100)}%
+              </div>
+            </div>
+          </div>
+
+          {/* Model Evaluation Metrics Row */}
+          {result.mlPhishingPrediction?.metrics && (
+            <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between text-xs font-semibold text-slate-300 border-b border-slate-800/80 pb-2">
+                <span className="flex items-center gap-1.5 text-indigo-300 font-bold">
+                  <Layers className="w-3.5 h-3.5" />
+                  Test Set Evaluation Metrics (20% Holdout — 16,000 URLs)
+                </span>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Total Training Corpus: 80,000 URLs
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Accuracy</span>
+                  <span className="text-base font-bold font-mono text-emerald-400">
+                    {(result.mlPhishingPrediction.metrics.accuracy * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Precision</span>
+                  <span className="text-base font-bold font-mono text-indigo-400">
+                    {(result.mlPhishingPrediction.metrics.precision * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Recall</span>
+                  <span className="text-base font-bold font-mono text-violet-400">
+                    {(result.mlPhishingPrediction.metrics.recall * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">F1 Score</span>
+                  <span className="text-base font-bold font-mono text-amber-400">
+                    {(result.mlPhishingPrediction.metrics.f1Score * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Confusion Matrix Detail */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] pt-1 text-slate-400 font-mono">
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-emerald-400 font-bold block">True Positives:</span>
+                  <span>{result.mlPhishingPrediction.metrics.confusionMatrix.truePositives.toLocaleString()} (Caught)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-indigo-400 font-bold block">True Negatives:</span>
+                  <span>{result.mlPhishingPrediction.metrics.confusionMatrix.trueNegatives.toLocaleString()} (Safe)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-amber-400 font-bold block">False Positives:</span>
+                  <span>{result.mlPhishingPrediction.metrics.confusionMatrix.falsePositives.toLocaleString()} (Benign Flagged)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-rose-400 font-bold block">False Negatives:</span>
+                  <span>{result.mlPhishingPrediction.metrics.confusionMatrix.falseNegatives.toLocaleString()} (Missed)</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Model Flagged URL Indicators */}
+          {result.mlPhishingPrediction?.indicatorsFlagged && result.mlPhishingPrediction.indicatorsFlagged.length > 0 && (
+            <div className="space-y-1.5">
+              <span className="text-xs font-bold text-amber-300 block">
+                Model Flagged Suspicious Structural Features:
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {result.mlPhishingPrediction.indicatorsFlagged.map((flag, idx) => (
+                  <span
+                    key={idx}
+                    className="text-[11px] bg-slate-800 text-slate-200 px-2.5 py-1 rounded-md border border-slate-700 font-medium"
+                  >
+                    • {flag}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="pt-2 border-t border-slate-800 text-xs text-slate-300 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-800/80">
+              <span className="font-bold text-indigo-300 block mb-1">Architecture Separation:</span>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                This prediction evaluates URL structural deception (brand lookalikes, TLD abuse, subdomain nesting). It does <strong>not</strong> prove whether physical items sold are counterfeit or authentic.
+              </p>
+            </div>
+            <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-800/80">
+              <span className="font-bold text-indigo-300 block mb-1">Dataset &amp; Weights Artifact:</span>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Trained on <code>malicious_phish.csv</code>. Evaluated across 16,000 holdout URLs with zero data leakage. Model weights saved in <code>ml/trained_model.json</code>.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Machine Learning Product Listing Classification Card (for product assessments) */}
+      {result.type === 'product' && result.mlProductPrediction && (
+        <div className="p-6 bg-slate-900 text-white rounded-2xl space-y-5 shadow-xl border border-slate-800">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-violet-500/20 text-violet-400 rounded-xl border border-violet-500/30">
+                <Cpu className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="font-bold text-sm text-white">Machine Learning Product Listing Classifier</h4>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-emerald-500/20 text-emerald-300 border-emerald-500/30 font-semibold flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Trained on product_listings_dataset.csv (10,000 listings)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Supervised Logistic Regression evaluating 14 pricing, seller, return-policy &amp; content markers.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 bg-slate-800/90 px-4 py-2.5 rounded-xl border border-slate-700/80 self-start sm:self-auto">
+              <div className="text-right">
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider block font-medium">
+                  Model Prediction
+                </span>
+                <span
+                  className={`text-sm font-bold ${
+                    result.mlProductPrediction.probability >= 0.5 ? 'text-rose-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {result.mlProductPrediction.probability >= 0.5
+                    ? 'Elevated Deception Risk'
+                    : 'Lower-Risk Listing Pattern'}
+                </span>
+              </div>
+              <div className="text-2xl font-mono font-extrabold text-white">
+                {Math.round(result.mlProductPrediction.probability * 100)}%
+              </div>
+            </div>
+          </div>
+
+          {result.mlProductPrediction.metrics && (
+            <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between text-xs font-semibold text-slate-300 border-b border-slate-800/80 pb-2">
+                <span className="flex items-center gap-1.5 text-violet-300 font-bold">
+                  <Layers className="w-3.5 h-3.5" />
+                  Test Set Evaluation Metrics (20% Holdout — 2,000 Listings)
+                </span>
+                <span className="text-[11px] font-mono text-slate-400">
+                  Total Corpus: 10,000 Listings
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Accuracy</span>
+                  <span className="text-base font-bold font-mono text-emerald-400">
+                    {(result.mlProductPrediction.metrics.accuracy * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Precision</span>
+                  <span className="text-base font-bold font-mono text-indigo-400">
+                    {(result.mlProductPrediction.metrics.precision * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">Recall</span>
+                  <span className="text-base font-bold font-mono text-violet-400">
+                    {(result.mlProductPrediction.metrics.recall * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800">
+                  <span className="text-[10px] text-slate-400 uppercase block font-medium">F1 Score</span>
+                  <span className="text-base font-bold font-mono text-amber-400">
+                    {(result.mlProductPrediction.metrics.f1Score * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] pt-1 text-slate-400 font-mono">
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-emerald-400 font-bold block">True Positives:</span>
+                  <span>{result.mlProductPrediction.metrics.confusionMatrix.truePositives.toLocaleString()} (Caught)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-indigo-400 font-bold block">True Negatives:</span>
+                  <span>{result.mlProductPrediction.metrics.confusionMatrix.trueNegatives.toLocaleString()} (Safe)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-amber-400 font-bold block">False Positives:</span>
+                  <span>{result.mlProductPrediction.metrics.confusionMatrix.falsePositives.toLocaleString()} (Flagged)</span>
+                </div>
+                <div className="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/70">
+                  <span className="text-rose-400 font-bold block">False Negatives:</span>
+                  <span>{result.mlProductPrediction.metrics.confusionMatrix.falseNegatives.toLocaleString()} (Missed)</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {result.mlProductPrediction.indicatorsFlagged && result.mlProductPrediction.indicatorsFlagged.length > 0 && (
+            <div className="space-y-1.5">
+              <span className="text-xs font-bold text-amber-300 block">
+                Model Flagged Listing Risk Features:
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {result.mlProductPrediction.indicatorsFlagged.map((flag, idx) => (
+                  <span
+                    key={idx}
+                    className="text-[11px] bg-slate-800 text-slate-200 px-2.5 py-1 rounded-md border border-slate-700 font-medium"
+                  >
+                    • {flag}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="pt-2 border-t border-slate-800 text-xs text-slate-300 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-800/80">
+              <span className="font-bold text-violet-300 block mb-1">Anti-Bias &amp; Physical Scope:</span>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                This model evaluates metadata signals (discounts paired with return/seller context and copywriting). Steep clearance discounts with reputable guarantees remain lower risk; it cannot verify physical goods.
+              </p>
+            </div>
+            <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-800/80">
+              <span className="font-bold text-violet-300 block mb-1">Dataset &amp; Weights Artifact:</span>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Trained on curated <code>product_listings_dataset.csv</code> (8,000 train / 2,000 holdout test). Weights saved in <code>ml/trained_product_model.json</code>.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 3. Warning Indicators List */}
       <div className="space-y-4">

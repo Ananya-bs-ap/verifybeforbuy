@@ -54,8 +54,57 @@ export interface AssessmentResult {
   unverifiedAspects: string[];
   aiExplanation?: string;
   aiExplanationProvider?: 'gemini' | 'deterministic-fallback';
+  mlPhishingPrediction?: MlPhishingResult;
+  mlProductPrediction?: MlProductResult;
   disclaimer: string;
   isDemoMode?: boolean;
+}
+
+export interface MlModelMetrics {
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1Score: number;
+  confusionMatrix: {
+    truePositives: number;
+    falsePositives: number;
+    trueNegatives: number;
+    falseNegatives: number;
+  };
+}
+
+export interface MlPhishingResult {
+  url: string;
+  isPhishing: boolean;
+  probability: number; // 0.0 - 1.0
+  riskScore: number; // 0 - 100
+  riskCategory: RiskCategory;
+  modelTrained: boolean;
+  modelType: string;
+  datasetName?: string;
+  trainingSamples?: number;
+  metrics?: MlModelMetrics;
+  featuresExtracted?: Record<string, any>;
+  indicatorsFlagged: string[];
+  disclaimer: string;
+  serviceAvailable: boolean;
+}
+
+export interface MlProductResult {
+  productName: string;
+  isHighRisk: boolean;
+  probability: number; // 0.0 - 1.0
+  riskScore: number; // 0 - 100
+  riskCategory: RiskCategory;
+  modelTrained: boolean;
+  modelType: string;
+  datasetName?: string;
+  trainingSamples?: number;
+  metrics?: MlModelMetrics;
+  featuresExtracted?: Record<string, any>;
+  indicatorsFlagged: string[];
+  disclaimer: string;
+  serviceAvailable: boolean;
 }
 
 export interface WebsiteAnalysisInput {

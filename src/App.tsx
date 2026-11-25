@@ -1,6 +1,6 @@
 /**
  * VerifyBeforeBuy AI — Main Application Container
- * Redesigned with a vibrant, human-crafted warm SaaS theme and instant 1-box link/website risk analyzer.
+ * Redesigned with a vibrant, human-crafted warm SaaS theme.
  */
 
 import React, { useState } from 'react';
@@ -9,61 +9,24 @@ import {
   Globe,
   Package,
   QrCode,
-  History,
-  Info,
   Menu,
   X,
-  Search,
   Sparkles,
   ArrowRight,
-  CheckCircle,
-  AlertTriangle,
-  Lock,
-  HelpCircle,
   Key,
-  ExternalLink,
 } from 'lucide-react';
-import { AssessmentResult } from './types';
-import { ApiService } from './lib/api';
-import { HistoryService } from './lib/supabase/historyService';
-import { VerificationReport } from './components/VerificationReport';
+import { WebsiteCheckerPage } from './pages/WebsiteCheckerPage';
+import { ProductCheckerPage } from './pages/ProductCheckerPage';
+import { BarcodeScannerPage } from './pages/BarcodeScannerPage';
+import { HistoryDashboardPage } from './pages/HistoryDashboardPage';
+import { AboutPage } from './pages/AboutPage';
 
 export type NavTab = 'home' | 'website' | 'product' | 'scanner' | 'history' | 'about';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
-  const [instantInput, setInstantInput] = useState('');
-  const [isInstantLoading, setIsInstantLoading] = useState(false);
-  const [instantResult, setInstantResult] = useState<AssessmentResult | null>(null);
-  const [instantError, setInstantError] = useState<string | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
-
-  const handleInstantSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const query = instantInput.trim();
-    if (!query) {
-      setInstantError('Please enter a website link or product URL.');
-      return;
-    }
-    setInstantError(null);
-    setIsInstantLoading(true);
-
-    try {
-      let result: AssessmentResult;
-      if (query.startsWith('http://') || query.startsWith('https://') || query.includes('.')) {
-        result = await ApiService.analyzeWebsite({ url: query });
-      } else {
-        result = await ApiService.analyzeProduct({ productName: query });
-      }
-      setInstantResult(result);
-      await HistoryService.saveRecord(result);
-    } catch (err: any) {
-      setInstantError(err.message || 'Analysis failed. Please check the link.');
-    } finally {
-      setIsInstantLoading(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans selection:bg-indigo-500 selection:text-white">
@@ -73,10 +36,7 @@ export default function App() {
           <div className="flex items-center justify-between h-20">
             {/* Brand Logo */}
             <button
-              onClick={() => {
-                setActiveTab('home');
-                setInstantResult(null);
-              }}
+              onClick={() => setActiveTab('home')}
               className="flex items-center gap-3 text-left group"
             >
               <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 group-hover:scale-105 transition-transform">
@@ -209,7 +169,7 @@ export default function App() {
       <main className="flex-1">
         {activeTab === 'home' && (
           <div className="space-y-20 pb-20">
-            {/* Hero Section with Vibrant Warm Gradient & Instant 1-Box Search */}
+            {/* Hero Section with Vibrant Warm Gradient & Action Cards */}
             <section className="relative pt-16 pb-20 overflow-hidden bg-gradient-to-b from-indigo-50/70 via-white to-slate-50 border-b border-slate-200/60">
               <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center space-y-8">
                 <div className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-100/80 rounded-full border border-indigo-200 shadow-xs">
@@ -222,73 +182,53 @@ export default function App() {
                 </h1>
 
                 <p className="text-lg text-slate-600 max-w-2xl mx-auto leading-relaxed">
-                  Paste any product link or store website below to instantly evaluate potential phishing risks, seller anomalies, and pricing indicators.
+                  Evaluate potential phishing websites, deceptive storefronts, seller anomalies, and product pricing indicators before you pay.
                 </p>
 
-                {/* Instant 1-Box Link / URL Checker */}
-                <div className="max-w-2xl mx-auto bg-white p-3 sm:p-4 rounded-2xl shadow-xl shadow-indigo-500/10 border border-slate-200/80">
-                  <form onSubmit={handleInstantSubmit} className="flex flex-col sm:flex-row gap-3">
-                    <div className="relative flex-1">
-                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-slate-400">
-                        <Globe className="w-5 h-5 text-indigo-500" />
+                {/* Primary Tool Action Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-3xl mx-auto pt-2 text-left">
+                  <div className="bg-white p-6 sm:p-7 rounded-2xl border border-slate-200/80 shadow-xl shadow-indigo-500/10 hover:border-indigo-200 transition-all flex flex-col justify-between space-y-5 group">
+                    <div className="space-y-3">
+                      <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center group-hover:scale-105 transition-transform">
+                        <Globe className="w-5 h-5" />
                       </div>
-                      <input
-                        type="text"
-                        value={instantInput}
-                        onChange={(e) => setInstantInput(e.target.value)}
-                        placeholder="Paste website URL (e.g. https://store.com) or product name..."
-                        className="w-full pl-11 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all font-mono"
-                      />
+                      <h2 className="text-lg font-bold text-slate-900">Website Checker</h2>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Inspect suspicious store URLs for phishing patterns, brand lookalikes, high-risk domains, and encryption status.
+                      </p>
                     </div>
                     <button
-                      type="submit"
-                      disabled={isInstantLoading}
-                      className="px-8 py-3.5 text-sm font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 rounded-xl transition-all shadow-md shadow-indigo-500/25 flex items-center justify-center gap-2 shrink-0 disabled:opacity-50"
+                      type="button"
+                      onClick={() => setActiveTab('website')}
+                      className="w-full px-5 py-3 text-sm font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 rounded-xl transition-all shadow-md shadow-indigo-500/20 flex items-center justify-center gap-2"
                     >
-                      {isInstantLoading ? (
-                        <span>Analyzing...</span>
-                      ) : (
-                        <>
-                          <Search className="w-4 h-4" />
-                          <span>Check Risk Now</span>
-                        </>
-                      )}
+                      <span>Check Website</span>
+                      <ArrowRight className="w-4 h-4" />
                     </button>
-                  </form>
+                  </div>
 
-                  {instantError && (
-                    <p className="text-xs text-rose-600 mt-2 text-left px-2 font-medium">
-                      {instantError}
-                    </p>
-                  )}
-
-                  <div className="flex items-center justify-between text-[11px] text-slate-400 pt-3 px-1 border-t border-slate-100 mt-3">
-                    <span>Try: <button type="button" onClick={() => setInstantInput('https://apple-security-verify-login.click')} className="text-indigo-600 font-semibold hover:underline">Suspicious Phishing URL</button></span>
-                    <span>or <button type="button" onClick={() => setInstantInput('Sony WH-1000XM4 Wireless Headphones')} className="text-indigo-600 font-semibold hover:underline">Product Listing</button></span>
+                  <div className="bg-white p-6 sm:p-7 rounded-2xl border border-slate-200/80 shadow-xl shadow-indigo-500/10 hover:border-violet-200 transition-all flex flex-col justify-between space-y-5 group">
+                    <div className="space-y-3">
+                      <div className="w-11 h-11 rounded-xl bg-violet-50 text-violet-600 flex items-center justify-center group-hover:scale-105 transition-transform">
+                        <Package className="w-5 h-5" />
+                      </div>
+                      <h2 className="text-lg font-bold text-slate-900">Product Checker</h2>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Evaluate suspicious product listings for unusual pricing gaps, seller accountability, return terms, and red-flag phrasing.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('product')}
+                      className="w-full px-5 py-3 text-sm font-bold text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 rounded-xl transition-all shadow-md shadow-violet-500/20 flex items-center justify-center gap-2"
+                    >
+                      <span>Check Product</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               </div>
             </section>
-
-            {/* Display Instant Result if available */}
-            {instantResult && (
-              <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
-                <div className="bg-white rounded-2xl shadow-xl border border-indigo-100 p-6 sm:p-8">
-                  <div className="flex items-center justify-between mb-4 pb-3 border-b border-slate-100">
-                    <span className="text-xs font-bold uppercase tracking-wider text-indigo-600">
-                      Instant Analysis Results
-                    </span>
-                    <button
-                      onClick={() => setInstantResult(null)}
-                      className="text-xs text-slate-500 hover:text-slate-900 font-medium"
-                    >
-                      Close Result
-                    </button>
-                  </div>
-                  <VerificationReport result={instantResult} onReset={() => setInstantResult(null)} />
-                </div>
-              </section>
-            )}
 
             {/* Feature Highlights - Vibrant Human Design */}
             <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -373,11 +313,11 @@ export default function App() {
         )}
 
         {activeTab === 'history' && (
-          <div className="py-8"><HistoryDashboardPage onNavigate={(tab) => setActiveTab(tab)} /></div>
+          <div className="py-8"><HistoryDashboardPage onNavigate={(tab: any) => setActiveTab(tab)} /></div>
         )}
 
         {activeTab === 'about' && (
-          <div className="py-8"><AboutPage onNavigate={(tab) => setActiveTab(tab)} /></div>
+          <div className="py-8"><AboutPage onNavigate={(tab: any) => setActiveTab(tab)} /></div>
         )}
       </main>
 

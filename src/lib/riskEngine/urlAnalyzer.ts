@@ -8,6 +8,7 @@
  */
 
 import { RiskIndicator, PositiveSignal } from '../../types';
+import { isValidDomainName, isValidIpv4, isValidIpv6 } from '../urlValidator';
 
 interface AnalyzedUrlResult {
   indicators: RiskIndicator[];
@@ -43,9 +44,26 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
 
   let evidenceWeight = 30; // Base evidence for syntactic URL analysis
 
-  // 1. Basic sanitization and protocol check
+  // 1. Basic sanitization and explicit protocol tracking
   let trimmed = rawUrl.trim();
-  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+  const hasAnyScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed);
+  const hadExplicitHttpScheme = /^https?:\/\//i.test(trimmed);
+
+  if (!trimmed || /\s/.test(trimmed)) {
+    indicators.push({
+      id: 'invalid-url-format',
+      name: 'Invalid URL Structure',
+      category: 'technical',
+      severity: 'high',
+      scoreImpact: 60,
+      isObserved: true,
+      description: 'The input is empty or contains whitespace and is not a valid web address.',
+      remedyOrPrecaution: 'Enter a complete domain or web URL such as https://example.com.',
+    });
+    return { indicators, positiveSignals, evidenceWeight: 10, unverifiedAspects };
+  }
+
+  if (!hasAnyScheme) {
     trimmed = 'https://' + trimmed;
   }
 
@@ -58,7 +76,7 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
       name: 'Malformed URL Syntax',
       category: 'technical',
       severity: 'high',
-      scoreImpact: 50,
+      scoreImpact: 60,
       isObserved: true,
       description: 'The supplied text is not a valid RFC-compliant web address.',
       remedyOrPrecaution: 'Verify the full address from your browser address bar or message source.',
@@ -85,6 +103,22 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
   const hostname = parsed.hostname.toLowerCase();
   const pathname = parsed.pathname.toLowerCase();
 
+  // Enforce valid domain structure (reject bare words like "isjbfwe" without a valid TLD or IP)
+  const validHost = isValidIpv4(hostname) || isValidIpv6(hostname) || isValidDomainName(hostname);
+  if (!validHost) {
+    indicators.push({
+      id: 'invalid-url-format',
+      name: 'Invalid URL / Missing Domain Extension',
+      category: 'technical',
+      severity: 'high',
+      scoreImpact: 60,
+      isObserved: true,
+      description: `"${rawUrl.trim()}" does not have a valid domain extension (TLD) or IP host structure.`,
+      remedyOrPrecaution: 'Enter a complete website address such as https://example.com or example.com.',
+    });
+    return { indicators, positiveSignals, evidenceWeight: 15, unverifiedAspects };
+  }
+
   // 2. Protocol Check (HTTP vs HTTPS)
   if (protocol === 'http:') {
     indicators.push({
@@ -97,7 +131,7 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
       description: 'The connection is unencrypted. Payment details and credentials can be intercepted by third parties.',
       remedyOrPrecaution: 'Never submit credit card details, passwords, or personal data on unencrypted HTTP pages.',
     });
-  } else {
+  } else if (hadExplicitHttpScheme) {
     positiveSignals.push({
       id: 'https-enabled',
       name: 'Standard HTTPS Encryption',

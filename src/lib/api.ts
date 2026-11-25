@@ -9,16 +9,70 @@ import {
   WebsiteAnalysisInput,
   ProductAnalysisInput,
   CodeAnalysisInput,
+  MlPhishingResult,
+  MlProductResult,
 } from '../types';
+import { predictPhishing, getModelMetadata } from './mlInference';
+import { predictProductRisk, getProductModelMetadata } from './productMlInference';
 import { RiskScoringEngine } from './riskEngine/engine';
+import { validateWebsiteUrl } from './urlValidator';
 
 export class ApiService {
   /**
-   * Analyze Website URL
+   * Request ML Phishing Prediction (Uses model trained on Kaggle malicious_phish.csv)
    */
-  public static async analyzeWebsite(input: WebsiteAnalysisInput): Promise<AssessmentResult> {
+  public static async predictPhishingWithML(url: string): Promise<MlPhishingResult> {
+    const validation = validateWebsiteUrl(url);
+    if (!validation.valid || !validation.normalizedUrl) {
+      throw new Error(validation.error || 'Invalid URL. Please enter a valid website address.');
+    }
+
     try {
-      const response = await fetch('/api/analyze/website', {
+      const response = await fetch('/api/ml/predict-phishing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: validation.normalizedUrl }),
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+      if (response.status >= 400 && response.status < 500) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || 'Invalid URL. Please enter a valid website address.');
+      }
+    } catch (err: any) {
+      if (err?.message && err.message.startsWith('Invalid URL')) {
+        throw err;
+      }
+      console.warn('ML phishing server request error, running local inference:', err.message);
+    }
+
+    // Direct local inference using identical trained weights (only for validated URLs)
+    return predictPhishing(validation.normalizedUrl);
+  }
+
+  /**
+   * Get ML Model Training Information & Metrics
+   */
+  public static async getModelInfo() {
+    try {
+      const response = await fetch('/api/ml/model-info');
+      if (response.ok) {
+        return await response.json();
+      }
+    } catch {
+      // Fallback to local metadata
+    }
+    return getModelMetadata();
+  }
+
+  /**
+   * Request ML Product Listing Risk Prediction
+   */
+  public static async predictProductWithML(input: ProductAnalysisInput): Promise<MlProductResult> {
+    try {
+      const response = await fetch('/api/ml/predict-product', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),
@@ -27,14 +81,69 @@ export class ApiService {
       if (response.ok) {
         return await response.json();
       }
+    } catch (err: any) {
+      console.warn('ML product server request error, running local inference:', err.message);
+    }
+
+    return predictProductRisk(input);
+  }
+
+  /**
+   * Get Product ML Model Training Information & Metrics
+   */
+  public static async getProductModelInfo() {
+    try {
+      const response = await fetch('/api/ml/product-model-info');
+      if (response.ok) {
+        return await response.json();
+      }
+    } catch {
+      // Fallback to local metadata
+    }
+    return getProductModelMetadata();
+  }
+  /**
+   * Analyze Website URL
+   */
+  public static async analyzeWebsite(input: WebsiteAnalysisInput): Promise<AssessmentResult> {
+    const validation = validateWebsiteUrl(input.url);
+    if (!validation.valid || !validation.normalizedUrl) {
+      throw new Error(validation.error || 'Invalid URL. Please enter a valid website address.');
+    }
+
+    const normalizedInput: WebsiteAnalysisInput = {
+      ...input,
+      url: validation.normalizedUrl,
+    };
+
+    let clientError: Error | null = null;
+    try {
+      const response = await fetch('/api/analyze/website', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(normalizedInput),
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+
       const errData = await response.json().catch(() => ({}));
-      if (errData.error) throw new Error(errData.error);
+      if (response.status >= 400 && response.status < 500) {
+        clientError = new Error(errData.error || 'Invalid URL. Please enter a valid website address.');
+      } else {
+        throw new Error(errData.error || `Server error (${response.status})`);
+      }
     } catch (err: any) {
       console.warn('Backend API request failed, using client engine fallback:', err.message);
     }
 
-    // Direct client engine fallback
-    return RiskScoringEngine.assessWebsite(input);
+    if (clientError) {
+      throw clientError;
+    }
+
+    // Direct client engine fallback (only reached on network/5xx unavailability, and URL is already validated)
+    return RiskScoringEngine.assessWebsite(normalizedInput);
   }
 
   /**
