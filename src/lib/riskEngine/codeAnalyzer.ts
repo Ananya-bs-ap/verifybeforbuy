@@ -7,8 +7,9 @@
  * Counterfeiters routinely duplicate legitimate barcodes on counterfeit packaging.
  */
 
-import { CodeAnalysisInput, RiskIndicator, PositiveSignal } from '../../types';
+import { CodeAnalysisInput, RiskIndicator, PositiveSignal, BarcodeLookupResult } from '../../types';
 import { analyzeUrlStructure } from './urlAnalyzer';
+import { validateWebsiteUrl } from '../urlValidator';
 
 // Clearly labeled synthetic demonstration records for testing
 export interface DemoCatalogItem {
@@ -56,7 +57,7 @@ export const SYNTHETIC_DEMO_CATALOG: Record<string, DemoCatalogItem> = {
   },
 };
 
-interface AnalyzedCodeResult {
+export interface AnalyzedCodeResult {
   indicators: RiskIndicator[];
   positiveSignals: PositiveSignal[];
   evidenceWeight: number;
@@ -64,9 +65,13 @@ interface AnalyzedCodeResult {
   matchedDemoItem?: DemoCatalogItem;
   detectedFormat: string;
   payloadType: 'url' | 'gtin-barcode' | 'text' | 'wifi' | 'contact' | 'unknown';
+  normalizedUrl?: string;
 }
 
-export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult {
+export function analyzeCodePayload(
+  input: CodeAnalysisInput,
+  barcodeLookup?: BarcodeLookupResult
+): AnalyzedCodeResult {
   const indicators: RiskIndicator[] = [];
   const positiveSignals: PositiveSignal[] = [];
   const unverifiedAspects: string[] = [
@@ -113,13 +118,83 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
       });
     }
 
-    // Lookup against synthetic catalog
+    if (barcodeLookup) {
+      if (barcodeLookup.found && barcodeLookup.sourceType === 'live_database' && barcodeLookup.product) {
+        const db = barcodeLookup.product;
+        positiveSignals.push({
+          id: 'live-database-match',
+          name: `Matched Live Product Database (${db.databaseSource})`,
+          description: `Retrieved registered item "${db.productName || 'Unnamed Product'}"${db.brand ? ` (${db.brand})` : ''} from ${db.databaseSource}. Database presence verifies registration metadata only and never proves a physical item is genuine.`,
+          isVerified: true,
+          scoreDeduction: 10,
+        });
+        return {
+          indicators,
+          positiveSignals,
+          evidenceWeight: 75,
+          unverifiedAspects,
+          matchedDemoItem: undefined,
+          detectedFormat,
+          payloadType,
+        };
+      }
+
+      if (barcodeLookup.found && barcodeLookup.sourceType === 'synthetic_demo') {
+        const matched = SYNTHETIC_DEMO_CATALOG[numericOnly];
+        positiveSignals.push({
+          id: 'demo-catalog-match',
+          name: 'Matched Synthetic Demo Specimen (Not Live Database)',
+          description: `Product was not found in live databases; matched local synthetic demo record (${barcodeLookup.product?.brand || matched?.brand || 'Demo'} — ${barcodeLookup.product?.productName || matched?.productName || numericOnly}). Never proves physical authenticity.`,
+          isVerified: false,
+          scoreDeduction: 8,
+        });
+        return {
+          indicators,
+          positiveSignals,
+          evidenceWeight: 55,
+          unverifiedAspects,
+          matchedDemoItem: matched,
+          detectedFormat,
+          payloadType,
+        };
+      }
+
+      if (barcodeLookup.status === 'not_found') {
+        unverifiedAspects.push(
+          `Product not found in available databases (${barcodeLookup.queriedDatabases.join(', ') || 'public registries'}). Unregistered or regional SKUs are not evidence of counterfeiting.`
+        );
+        return {
+          indicators,
+          positiveSignals,
+          evidenceWeight: 45,
+          unverifiedAspects,
+          detectedFormat,
+          payloadType,
+        };
+      }
+
+      if (barcodeLookup.status === 'error') {
+        unverifiedAspects.push(
+          `External barcode database lookup unavailable or timed out (${barcodeLookup.message}). No product details were fabricated.`
+        );
+        return {
+          indicators,
+          positiveSignals,
+          evidenceWeight: 40,
+          unverifiedAspects,
+          detectedFormat,
+          payloadType,
+        };
+      }
+    }
+
+    // Offline fallback when server lookup was omitted: check local 3-item synthetic demo catalog
     const matched = SYNTHETIC_DEMO_CATALOG[numericOnly];
     if (matched) {
       positiveSignals.push({
         id: 'demo-catalog-match',
-        name: 'Matched Reference Item (Demonstration Catalog)',
-        description: `Matched test record: ${matched.brand} — ${matched.productName}. (Note: barcode presence does not confirm the physical item is genuine).`,
+        name: 'Matched Demo Database Specimen (Not Proof of Authenticity)',
+        description: `Matched local 3-item demo database entry: ${matched.brand} — ${matched.productName}. Demo match only illustrates catalog lookup and never verifies physical authenticity.`,
         isVerified: false,
         scoreDeduction: 10,
       });
@@ -133,7 +208,7 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
         payloadType,
       };
     } else {
-      unverifiedAspects.push('External global GS1 catalog lookup (database not connected in current prototype)');
+      unverifiedAspects.push('External live barcode database lookup did not run in offline mode (local demo database has 3 test items)');
       return {
         indicators,
         positiveSignals,
@@ -145,13 +220,16 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
     }
   }
 
-  // 2. Check if QR payload is a URL
-  if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('www.')) {
+  // 2. Check if QR payload is an HTTP or HTTPS URL (also normalize www. QR payloads)
+  if (/^https?:\/\//i.test(raw) || /^www\./i.test(raw)) {
     payloadType = 'url';
     detectedFormat = detectedFormat.includes('QR') ? detectedFormat : 'QR Code (Web URL)';
 
-    // Analyze embedded URL for risks
-    const urlAnalysis = analyzeUrlStructure(raw);
+    const urlValidation = validateWebsiteUrl(raw);
+    const normalizedUrl = urlValidation.valid && urlValidation.normalizedUrl ? urlValidation.normalizedUrl : undefined;
+
+    // Analyze embedded URL for structural risks (never executes or opens URL)
+    const urlAnalysis = analyzeUrlStructure(normalizedUrl || raw);
     indicators.push(...urlAnalysis.indicators);
     positiveSignals.push(...urlAnalysis.positiveSignals);
     unverifiedAspects.push(...urlAnalysis.unverifiedAspects);
@@ -165,7 +243,7 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
       scoreImpact: 8,
       isObserved: true,
       description: 'Physical QR codes can be pasted over legitimate packaging or store stickers to redirect shoppers to malicious phishing clones.',
-      remedyOrPrecaution: 'Inspect physical packaging to ensure no secondary sticker was placed over the original printed QR code.',
+      remedyOrPrecaution: 'Inspect physical packaging to ensure no secondary sticker was placed over the original printed QR code, and review the URL text before visiting.',
     });
 
     return {
@@ -175,12 +253,23 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
       unverifiedAspects,
       detectedFormat,
       payloadType,
+      normalizedUrl,
     };
   }
 
-  // 3. Fallback text or unsupported payload
-  payloadType = 'text';
-  detectedFormat = 'Plain Text / Custom Payload';
+  // 3. Fallback non-URL QR or custom text payload (never invoke URL phishing checks)
+  const upperRaw = raw.toUpperCase();
+  if (upperRaw.startsWith('WIFI:')) {
+    payloadType = 'wifi';
+    detectedFormat = 'QR Code (Wi-Fi Configuration)';
+  } else if (upperRaw.startsWith('BEGIN:VCARD')) {
+    payloadType = 'contact';
+    detectedFormat = 'QR Code (Contact vCard)';
+  } else {
+    payloadType = 'text';
+    detectedFormat = 'Plain Text / Custom Payload';
+  }
+
   if (raw.length < 3) {
     indicators.push({
       id: 'insufficient-code-length',
@@ -204,11 +293,46 @@ export function analyzeCodePayload(input: CodeAnalysisInput): AnalyzedCodeResult
   };
 }
 
+export interface Gs1ValidationResult {
+  cleaned: string;
+  isNumeric: boolean;
+  isStandardLength: boolean;
+  isValidChecksum: boolean;
+  formatLabel?: string;
+}
+
+/**
+ * Validate standard GS1 barcode lengths (8, 12, 13, 14) and Modulo-10 check digit
+ */
+export function validateGs1BarcodeFormat(rawCode: string): Gs1ValidationResult {
+  const cleaned = (rawCode || '').replace(/[\s-]/g, '');
+  const isNumeric = /^\d+$/.test(cleaned);
+  const isStandardLength =
+    isNumeric &&
+    (cleaned.length === 8 || cleaned.length === 12 || cleaned.length === 13 || cleaned.length === 14);
+
+  let formatLabel: string | undefined;
+  if (isStandardLength) {
+    if (cleaned.length === 8) formatLabel = 'EAN-8 (8 digits)';
+    else if (cleaned.length === 12) formatLabel = 'UPC-A (12 digits)';
+    else if (cleaned.length === 13) formatLabel = 'EAN-13 (13 digits)';
+    else if (cleaned.length === 14) formatLabel = 'ITF-14 (14 digits)';
+  }
+
+  return {
+    cleaned,
+    isNumeric,
+    isStandardLength,
+    isValidChecksum: isStandardLength ? verifyGs1CheckDigit(cleaned) : false,
+    formatLabel,
+  };
+}
+
 /**
  * Standard GS1 Modulo-10 Check Digit calculation
  */
-function verifyGs1CheckDigit(digits: string): boolean {
-  if (digits.length < 8) return false;
+export function verifyGs1CheckDigit(digits: string): boolean {
+  if (!/^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(digits)) return false;
   const chars = digits.split('').map(Number);
   const checkDigit = chars[chars.length - 1];
   const payload = chars.slice(0, -1);

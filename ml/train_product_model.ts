@@ -1,19 +1,20 @@
 /**
  * ML Product Listing Risk Model Trainer for VerifyBeforeBuy AI
  *
- * 1. Builds a curated, labeled product listing dataset (ml/data/product_listings_dataset.csv)
- *    with 10,000 diverse legitimate and high-risk deceptive product listings, including
- *    anti-bias clearance/refurbished examples.
- * 2. Loads the CSV, extracts 14 structured listing/pricing/seller/content features,
- *    and splits 80% Train / 20% Test without data leakage.
- * 3. Standardizes features strictly using training-set mean & std.
- * 4. Trains a Logistic Regression classifier with L2 regularization.
- * 5. Evaluates Accuracy, Precision, Recall, F1 Score, and Confusion Matrix on the holdout test set.
- * 6. Exports genuine trained parameters and metrics to ml/trained_product_model.json & src/ml_product_model.json.
+ * Accepts an externally supplied labelled CSV dataset without automatically generating
+ * or overwriting dataset files. Preserves the 11-column schema and 14 Logistic Regression
+ * features, using GS1 Modulo-10 checksum validation and 3-state return policy semantics
+ * aligned with src/lib/productMlInference.ts.
+ *
+ * Usage:
+ *   npx tsx ml/train_product_model.ts --csv ml/data/your_real_labelled_dataset.csv
+ *   npx tsx ml/train_product_model.ts --csv ml/data/your_real_labelled_dataset.csv --dataset-name "Real Marketplace Fraud Dataset"
  */
 
 import fs from 'fs';
 import path from 'path';
+import { verifyGs1CheckDigit } from '../src/lib/riskEngine/codeAnalyzer.ts';
+import { ReturnPolicyStatus } from '../src/types/index.ts';
 
 export const PRODUCT_FEATURE_KEYS = [
   'hasReferencePrice',
@@ -33,6 +34,20 @@ export const PRODUCT_FEATURE_KEYS = [
 ] as const;
 
 export type ProductFeatureKey = (typeof PRODUCT_FEATURE_KEYS)[number];
+
+export const EXPECTED_DATASET_COLUMNS = [
+  'productName',
+  'brand',
+  'listedPrice',
+  'referencePrice',
+  'sellerName',
+  'sellerRating',
+  'hasReturnPolicy',
+  'productDescription',
+  'productIdentifier',
+  'listingUrl',
+  'label',
+] as const;
 
 const REPLICA_KEYWORDS = [
   '1:1 replica',
@@ -94,18 +109,27 @@ export interface RawProductRow {
   referencePrice?: number;
   sellerName: string;
   sellerRating?: number;
-  hasReturnPolicy: boolean;
+  returnPolicyStatus: ReturnPolicyStatus;
+  hasReturnPolicy?: boolean;
   productDescription: string;
   productIdentifier: string;
   listingUrl: string;
   label: 0 | 1; // 0 = lower-risk legitimate listing, 1 = high-risk deceptive listing
 }
 
+/**
+ * Extract the 14 standardized ML features consistently with src/lib/productMlInference.ts.
+ * - Uses GS1 Modulo-10 checksum validation for hasValidGs1Barcode
+ * - Treats 'unknown' / missing return policy neutrally (noReturnPolicy = 0)
+ */
 export function extractProductFeatureVector(row: Omit<RawProductRow, 'label'>): number[] {
   const hasRef = row.referencePrice !== undefined && row.referencePrice > 0 ? 1 : 0;
   let discountRatio = 0;
   if (hasRef && row.listedPrice !== undefined && row.referencePrice! > 0) {
-    discountRatio = Math.max(0, Math.min(1, (row.referencePrice! - row.listedPrice) / row.referencePrice!));
+    discountRatio = Math.max(
+      0,
+      Math.min(1, (row.referencePrice! - row.listedPrice) / row.referencePrice!)
+    );
   }
   const isExtremeDiscount = discountRatio >= 0.75 ? 1 : 0;
 
@@ -118,15 +142,25 @@ export function extractProductFeatureVector(row: Omit<RawProductRow, 'label'>): 
   const hasSellerRating = row.sellerRating !== undefined && row.sellerRating > 0 ? 1 : 0;
   const lowSellerRating = hasSellerRating && row.sellerRating! < 3.5 ? 1 : 0;
   const highSellerRating = hasSellerRating && row.sellerRating! >= 4.5 ? 1 : 0;
-  const noReturnPolicy = row.hasReturnPolicy === false ? 1 : 0;
+
+  const returnPolicyStatus: ReturnPolicyStatus =
+    row.returnPolicyStatus ||
+    (row.hasReturnPolicy === true
+      ? 'available'
+      : row.hasReturnPolicy === false
+        ? 'not_available'
+        : 'unknown');
+  const noReturnPolicy = returnPolicyStatus === 'not_available' ? 1 : 0;
 
   const textBlob = `${row.productName} ${row.productDescription}`.toLowerCase();
   const hasReplicaKeyword = REPLICA_KEYWORDS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
   const hasPaymentPressureKeyword = HIGH_PRESSURE_TACTICS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
-  const hasClearanceOrRefurbContext = CLEARANCE_CONTEXT_KEYWORDS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
+  const hasClearanceOrRefurbContext = CLEARANCE_CONTEXT_KEYWORDS.some((kw) => textBlob.includes(kw))
+    ? 1
+    : 0;
 
   const cleanedCode = (row.productIdentifier || '').replace(/[\s-]/g, '');
-  const hasValidGs1Barcode = /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(cleanedCode) ? 1 : 0;
+  const hasValidGs1Barcode = verifyGs1CheckDigit(cleanedCode) ? 1 : 0;
 
   const urlLower = (row.listingUrl || '').trim().toLowerCase();
   let hasRiskyListingUrl = 0;
@@ -134,7 +168,8 @@ export function extractProductFeatureVector(row: Omit<RawProductRow, 'label'>): 
     const usesHttp = urlLower.startsWith('http://');
     const usesAbuseTld = HIGH_ABUSE_TLDS.some((tld) => urlLower.includes(tld));
     const hasIp = /\b\d{1,3}(\.\d{1,3}){3}\b/.test(urlLower);
-    const hasSuspiciousPath = urlLower.includes('cheap') || urlLower.includes('outlet-deals') || urlLower.includes('verify');
+    const hasSuspiciousPath =
+      urlLower.includes('cheap') || urlLower.includes('outlet-deals') || urlLower.includes('verify');
     if (usesHttp || usesAbuseTld || hasIp || hasSuspiciousPath) {
       hasRiskyListingUrl = 1;
     }
@@ -158,7 +193,7 @@ export function extractProductFeatureVector(row: Omit<RawProductRow, 'label'>): 
   ];
 }
 
-// Deterministic PRNG (Mulberry32) for reproducible dataset creation and splitting
+// Deterministic PRNG (Mulberry32) for reproducible shuffling & splitting
 function createRng(seed: number) {
   let state = seed >>> 0;
   return () => {
@@ -169,271 +204,231 @@ function createRng(seed: number) {
   };
 }
 
-function generateCuratedDataset(totalRows = 10000): RawProductRow[] {
-  const rng = createRng(20261124);
-  const pick = <T>(arr: T[]): T => arr[Math.floor(rng() * arr.length)];
-  const randRange = (min: number, max: number) => min + rng() * (max - min);
-
-  const brands = ['Sony', 'Apple', 'Nike', 'Samsung', 'Bose', 'Dyson', 'Rolex', 'Garmin', 'Canon', 'Coach'];
-  const products = [
-    'Wireless Noise Cancelling Headphones',
-    'Smart Watch Series 9',
-    'Running Sneakers Pro',
-    'OLED Gaming Monitor',
-    'Cordless Vacuum V15',
-    'Automatic Dive Watch',
-    'Mirrorless Camera Kit',
-    'Leather Crossbody Bag',
-    'Pro Earbuds 2nd Gen',
-    'Bluetooth Portable Speaker',
-  ];
-  const reputableSellers = [
-    'DirectRecertifiedAudio',
-    'BestBuy Marketplace',
-    'OfficialBrandOutlet',
-    'VerifiedTechSupply',
-    'AuthorizedRetailGroup',
-    'NorthStarElectronics',
-    'PrimeAudioDepot',
-  ];
-  const sketchySellers = [
-    'deals_king_99',
-    'store123_outlet',
-    'discount_outlet_vip',
-    'luxury-outlet-express',
-    'user99_imports',
-    'anon_shop_direct',
-    'flashsale_hub',
-  ];
-  const safeUrls = [
-    'https://www.amazon.com/dp/B08N5WRWNW',
-    'https://www.bestbuy.com/site/product/64501',
-    'https://www.ebay.com/itm/295123456',
-    'https://www.target.com/p/certified-item',
-    'https://www.walmart.com/ip/verified-electronics',
-    '',
-  ];
-  const riskyUrls = [
-    'https://luxury-outlet-deals.xyz/item/promo',
-    'https://official-brand-cheap-outlet.top/checkout',
-    'http://45.33.32.156:8080/shop-deal',
-    'https://brand-clearance-verify.click/order',
-    'https://vip-discount-store.work/buy-now',
-    '',
-  ];
-  const validBarcodes = ['027242919419', '012000000133', '5000112637922', '190199220019', '8806094211023'];
-
-  const rows: RawProductRow[] = [];
-  const half = Math.floor(totalRows / 2);
-
-  // 1. Generate Lower-Risk / Legitimate Listings (label = 0)
-  for (let i = 0; i < half; i++) {
-    const brand = pick(brands);
-    const prod = pick(products);
-    const refPrice = Number(randRange(80, 1200).toFixed(2));
-
-    // Realistic mix: standard retail (55%), steep legitimate clearance/refurbished (22%),
-    // minimal-info casual listing (13%), independent final-sale / imperfect rating seller (10%)
-    const subtypeRoll = rng();
-    let listedPrice: number | undefined = Number((refPrice * randRange(0.70, 1.05)).toFixed(2));
-    let referencePrice: number | undefined = refPrice;
-    let sellerName = pick(reputableSellers);
-    let sellerRating: number | undefined = Number(randRange(4.0, 5.0).toFixed(1));
-    let hasReturnPolicy = rng() > 0.14; // some legit vintage/final-sale sellers have no returns
-    let description = `Brand new ${brand} ${prod} with standard manufacturer warranty and tracked shipping.`;
-    let barcode = rng() > 0.30 ? pick(validBarcodes) : '';
-    let url = pick(safeUrls);
-
-    if (subtypeRoll > 0.55 && subtypeRoll <= 0.77) {
-      // Legitimate steep clearance / refurbished item (anti-bias training scenario!)
-      listedPrice = Number((refPrice * randRange(0.10, 0.38)).toFixed(2));
-      description = `Official factory refurbished clearance ${brand} ${prod}. 30-day return policy and full original accessories included.`;
-      hasReturnPolicy = true;
-      sellerRating = Number(randRange(4.3, 5.0).toFixed(1));
-    } else if (subtypeRoll > 0.77 && subtypeRoll <= 0.90) {
-      // Minimal information casual/artisan listing (missing fields != fraud)
-      referencePrice = undefined;
-      sellerName = rng() > 0.5 ? 'ArtisanWorkshop' : '';
-      sellerRating = undefined;
-      barcode = '';
-      url = '';
-      description = `Gently used or handcrafted item in good condition.`;
-    } else if (subtypeRoll > 0.90) {
-      // Legit independent marketplace seller with steep used discount, imperfect rating, or generic handle
-      listedPrice = Number((refPrice * randRange(0.25, 0.55)).toFixed(2));
-      sellerName = rng() > 0.5 ? pick(sketchySellers) : 'SmallBatchResale';
-      sellerRating = Number(randRange(2.9, 3.8).toFixed(1));
-      hasReturnPolicy = rng() > 0.5;
-      description = `Pre-owned ${brand} ${prod}, tested working, normal wear.`;
-    }
-
-    rows.push({
-      productName: `${brand} ${prod}`,
-      brand,
-      listedPrice,
-      referencePrice,
-      sellerName,
-      sellerRating,
-      hasReturnPolicy,
-      productDescription: description,
-      productIdentifier: barcode,
-      listingUrl: url,
-      label: 0,
-    });
-  }
-
-  // 2. Generate High-Risk / Deceptive Listings (label = 1)
-  for (let i = 0; i < totalRows - half; i++) {
-    const brand = pick(brands);
-    const prod = pick(products);
-    const refPrice = Number(randRange(180, 3500).toFixed(2));
-    // Most are steeply discounted, though ~18% price near retail to fool buyers
-    const listedPrice =
-      rng() < 0.82
-        ? Number((refPrice * randRange(0.04, 0.38)).toFixed(2))
-        : Number((refPrice * randRange(0.55, 0.85)).toFixed(2));
-
-    const hasReplica = rng() < 0.45;
-    const hasPaymentPressure = rng() < 0.48;
-    const ratingRoll = rng();
-    // 55% low rating, 30% no rating (new unverified store), 15% decent/fake rating
-    const sellerRating =
-      ratingRoll < 0.55
-        ? Number(randRange(1.2, 3.3).toFixed(1))
-        : ratingRoll < 0.85
-          ? undefined
-          : Number(randRange(3.6, 4.4).toFixed(1));
-    const hasNoReturns = rng() < 0.78;
-    const isGenericSeller = rng() < 0.65;
-    const usesSketchyUrl = rng() < 0.58;
-
-    const descParts: string[] = [`Hot deal ${brand} ${prod}!`];
-    if (hasReplica) descParts.push(pick(REPLICA_KEYWORDS) + ' quality.');
-    if (hasPaymentPressure) descParts.push(`Pay via ${pick(HIGH_PRESSURE_TACTICS)}.`);
-    if (!hasReplica && !hasPaymentPressure) {
-      descParts.push('Limited stock direct factory drop, no box, no receipt.');
-    }
-
-    rows.push({
-      productName: `${brand} ${prod}`,
-      brand,
-      listedPrice,
-      referencePrice: rng() > 0.18 ? refPrice : undefined,
-      sellerName: isGenericSeller ? pick(sketchySellers) : rng() > 0.25 ? 'QuickDropMerchants' : '',
-      sellerRating,
-      hasReturnPolicy: !hasNoReturns,
-      productDescription: descParts.join(' '),
-      productIdentifier: rng() < 0.70 ? `SKU-${Math.floor(randRange(1000, 9999))}` : pick(validBarcodes),
-      listingUrl: usesSketchyUrl ? pick(riskyUrls.filter(Boolean)) : pick(safeUrls),
-      label: 1,
-    });
-  }
-
-  return rows;
-}
-
-function escapeCsv(val: string | number | boolean | undefined): string {
-  if (val === undefined || val === null) return '';
-  const str = String(val);
-  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
-
-function parseCsvLine(line: string): string[] {
-  const result: string[] = [];
-  let current = '';
+/**
+ * Full RFC-4180 multi-line CSV parser supporting quoted fields containing commas/newlines.
+ */
+function parseCsvRecords(content: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
   let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQuotes && line[i + 1] === '"') {
-        current += '"';
-        i++;
+
+  const normalized = content.replace(/^\uFEFF/, '');
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (normalized[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
       } else {
-        inQuotes = !inQuotes;
+        field += ch;
       }
-    } else if (ch === ',' && !inQuotes) {
-      result.push(current);
-      current = '';
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field);
+      field = '';
+    } else if (ch === '\r') {
+      if (normalized[i + 1] === '\n') i++;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
     } else {
-      current += ch;
+      field += ch;
     }
   }
-  result.push(current);
-  return result;
+
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  return rows.filter((r) => r.some((cell) => cell.trim() !== ''));
 }
 
-async function runProductTraining() {
+const COLUMN_ALIASES: Record<(typeof EXPECTED_DATASET_COLUMNS)[number], string[]> = {
+  productName: ['productname', 'product_name', 'title', 'name', 'item_name'],
+  brand: ['brand', 'manufacturer', 'brand_name'],
+  listedPrice: ['listedprice', 'listed_price', 'discounted_price', 'sale_price', 'price'],
+  referencePrice: ['referenceprice', 'reference_price', 'retail_price', 'msrp', 'original_price'],
+  sellerName: ['sellername', 'seller_name', 'merchant', 'store_name', 'seller'],
+  sellerRating: ['sellerrating', 'seller_rating', 'overall_rating', 'product_rating', 'rating'],
+  hasReturnPolicy: ['hasreturnpolicy', 'has_return_policy', 'return_policy', 'returnpolicystatus', 'returns_accepted'],
+  productDescription: ['productdescription', 'product_description', 'description', 'notes'],
+  productIdentifier: ['productidentifier', 'product_identifier', 'upc', 'gtin', 'ean', 'sku', 'asin', 'uniq_id'],
+  listingUrl: ['listingurl', 'listing_url', 'product_url', 'url', 'link'],
+  label: ['label', 'is_fraud', 'is_counterfeit', 'is_scam', 'fraudulent', 'risk_label', 'target'],
+};
+
+function parseOptionalNumber(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.replace(/[^0-9.-]/g, '');
+  if (!cleaned) return undefined;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseReturnPolicyCell(raw: string | undefined): {
+  status: ReturnPolicyStatus;
+  boolVal?: boolean;
+} {
+  const val = (raw || '').trim().toLowerCase();
+  if (val === 'true' || val === 'available' || val === 'yes' || val === '1') {
+    return { status: 'available', boolVal: true };
+  }
+  if (val === 'false' || val === 'not_available' || val === 'not available' || val === 'no' || val === '0') {
+    return { status: 'not_available', boolVal: false };
+  }
+  return { status: 'unknown', boolVal: undefined };
+}
+
+function parseTargetLabel(raw: string | undefined): 0 | 1 | null {
+  const val = (raw || '').trim().toLowerCase();
+  if (val === '1' || val === 'true' || val === 'fraud' || val === 'counterfeit' || val === 'scam' || val === 'high_risk' || val === 'fake' || val === 'suspicious') {
+    return 1;
+  }
+  if (val === '0' || val === 'false' || val === 'legitimate' || val === 'genuine' || val === 'safe' || val === 'low_risk' || val === 'authentic') {
+    return 0;
+  }
+  return null;
+}
+
+function resolveCliArgs(): { csvPath?: string; datasetName?: string } {
+  const args = process.argv.slice(2);
+  let csvPath = process.env.PRODUCT_DATASET_PATH;
+  let datasetName: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--csv' && args[i + 1]) {
+      csvPath = args[++i];
+    } else if (args[i].startsWith('--csv=')) {
+      csvPath = args[i].slice('--csv='.length);
+    } else if (args[i] === '--dataset-name' && args[i + 1]) {
+      datasetName = args[++i];
+    } else if (args[i].startsWith('--dataset-name=')) {
+      datasetName = args[i].slice('--dataset-name='.length);
+    } else if (!args[i].startsWith('--') && !csvPath) {
+      csvPath = args[i];
+    }
+  }
+
+  return { csvPath, datasetName };
+}
+
+export async function runProductTraining() {
+  const { csvPath: requestedCsv, datasetName } = resolveCliArgs();
+
+  if (!requestedCsv) {
+    console.error('No external dataset CSV specified.');
+    console.error(
+      'Automatic synthetic dataset generation is disabled so existing data and trained artifacts are never overwritten.'
+    );
+    console.error('\nTo train on a real externally supplied labelled CSV dataset, run:');
+    console.error('  npx tsx ml/train_product_model.ts --csv path/to/real_labelled_listings.csv');
+    console.error('\nRequired CSV columns (or supported aliases):');
+    console.error(`  ${EXPECTED_DATASET_COLUMNS.join(', ')}`);
+    process.exit(1);
+  }
+
+  const resolvedCsvPath = path.resolve(requestedCsv);
+  if (!fs.existsSync(resolvedCsvPath)) {
+    console.error(`Dataset file not found: ${resolvedCsvPath}`);
+    process.exit(1);
+  }
+
   console.log('--- Starting Product Listing Risk ML Model Training ---');
+  console.log(`Reading externally supplied CSV (read-only): ${resolvedCsvPath}`);
 
-  const dataDir = path.resolve('ml/data');
-  fs.mkdirSync(dataDir, { recursive: true });
-  const csvPath = path.join(dataDir, 'product_listings_dataset.csv');
+  const rawContent = fs.readFileSync(resolvedCsvPath, 'utf-8');
+  const records = parseCsvRecords(rawContent);
+  if (records.length < 2) {
+    console.error('CSV must contain a header row and at least one labelled data row.');
+    process.exit(1);
+  }
 
-  const generated = generateCuratedDataset(10000);
-  const header = [
-    'productName',
-    'brand',
-    'listedPrice',
-    'referencePrice',
-    'sellerName',
-    'sellerRating',
-    'hasReturnPolicy',
-    'productDescription',
-    'productIdentifier',
-    'listingUrl',
-    'label',
-  ].join(',');
+  const headerLookup = new Map<string, number>();
+  records[0].forEach((colName, idx) => {
+    headerLookup.set(colName.trim().toLowerCase(), idx);
+  });
 
-  const csvLines = [
-    header,
-    ...generated.map((r) =>
-      [
-        escapeCsv(r.productName),
-        escapeCsv(r.brand),
-        escapeCsv(r.listedPrice),
-        escapeCsv(r.referencePrice),
-        escapeCsv(r.sellerName),
-        escapeCsv(r.sellerRating),
-        escapeCsv(r.hasReturnPolicy),
-        escapeCsv(r.productDescription),
-        escapeCsv(r.productIdentifier),
-        escapeCsv(r.listingUrl),
-        escapeCsv(r.label),
-      ].join(',')
-    ),
-  ];
+  const colIndex: Record<string, number> = {};
+  for (const canonicalCol of EXPECTED_DATASET_COLUMNS) {
+    const matchedAlias = COLUMN_ALIASES[canonicalCol].find((alias) => headerLookup.has(alias));
+    if (matchedAlias !== undefined) {
+      colIndex[canonicalCol] = headerLookup.get(matchedAlias)!;
+    }
+  }
 
-  fs.writeFileSync(csvPath, csvLines.join('\n'), 'utf-8');
-  console.log(`Dataset saved to ${csvPath} (${generated.length} labeled listings).`);
+  if (colIndex.label === undefined || colIndex.productName === undefined) {
+    console.error(
+      'Invalid dataset schema: CSV must contain at least a productName/title column and a binary target label column (e.g., label, is_fraud, is_counterfeit).'
+    );
+    process.exit(1);
+  }
 
-  // Reload from CSV to verify clean end-to-end parsing
-  const rawContent = fs.readFileSync(csvPath, 'utf-8').trim().split('\n');
   const parsedSamples: { vector: number[]; label: 0 | 1 }[] = [];
+  let skippedInvalidRows = 0;
 
-  for (let i = 1; i < rawContent.length; i++) {
-    const cols = parseCsvLine(rawContent[i]);
-    if (cols.length < 11) continue;
-    const row: Omit<RawProductRow, 'label'> = {
-      productName: cols[0],
-      brand: cols[1],
-      listedPrice: cols[2] ? parseFloat(cols[2]) : undefined,
-      referencePrice: cols[3] ? parseFloat(cols[3]) : undefined,
-      sellerName: cols[4],
-      sellerRating: cols[5] ? parseFloat(cols[5]) : undefined,
-      hasReturnPolicy: cols[6] === 'true',
-      productDescription: cols[7],
-      productIdentifier: cols[8],
-      listingUrl: cols[9],
+  for (let i = 1; i < records.length; i++) {
+    const row = records[i];
+    const getCell = (key: string) => (colIndex[key] !== undefined ? row[colIndex[key]] ?? '' : '');
+
+    const label = parseTargetLabel(getCell('label'));
+    const productName = getCell('productName').trim();
+    if (label === null || !productName) {
+      skippedInvalidRows++;
+      continue;
+    }
+
+    const returnParsed = parseReturnPolicyCell(getCell('hasReturnPolicy'));
+    const listedPrice = parseOptionalNumber(getCell('listedPrice'));
+    const referencePrice = parseOptionalNumber(getCell('referencePrice'));
+    const rawRating = parseOptionalNumber(getCell('sellerRating'));
+    const sellerRating =
+      rawRating !== undefined && rawRating >= 0 && rawRating <= 5 ? rawRating : undefined;
+
+    const sampleRow: Omit<RawProductRow, 'label'> = {
+      productName,
+      brand: getCell('brand').trim(),
+      listedPrice: listedPrice !== undefined && listedPrice > 0 ? listedPrice : undefined,
+      referencePrice: referencePrice !== undefined && referencePrice > 0 ? referencePrice : undefined,
+      sellerName: getCell('sellerName').trim(),
+      sellerRating,
+      returnPolicyStatus: returnParsed.status,
+      hasReturnPolicy: returnParsed.boolVal,
+      productDescription: getCell('productDescription').trim(),
+      productIdentifier: getCell('productIdentifier').trim(),
+      listingUrl: getCell('listingUrl').trim(),
     };
-    const label = cols[10].trim() === '1' ? 1 : 0;
+
     parsedSamples.push({
-      vector: extractProductFeatureVector(row),
+      vector: extractProductFeatureVector(sampleRow),
       label,
     });
   }
+
+  const class0Count = parsedSamples.filter((s) => s.label === 0).length;
+  const class1Count = parsedSamples.filter((s) => s.label === 1).length;
+  if (parsedSamples.length < 50 || class0Count === 0 || class1Count === 0) {
+    console.error(
+      `Insufficient or single-class labelled data (valid rows=${parsedSamples.length}, class0=${class0Count}, class1=${class1Count}). Both class 0 and class 1 examples are required.`
+    );
+    process.exit(1);
+  }
+
+  console.log(
+    `Loaded ${parsedSamples.length} labelled listings (class 0=${class0Count}, class 1=${class1Count}, skipped=${skippedInvalidRows}).`
+  );
 
   // Deterministic Fisher-Yates shuffle
   const rng = createRng(987654321);
@@ -551,9 +546,10 @@ async function runProductTraining() {
     featureWeights[key] = Number(weights[idx].toFixed(4));
   });
 
+  const csvBaseName = path.basename(resolvedCsvPath);
   const artifact = {
     modelType: 'Logistic Regression (Supervised Binary Classification)',
-    dataset: 'Curated Product Listing Risk Corpus (product_listings_dataset.csv)',
+    dataset: datasetName || `External Labelled Dataset (${csvBaseName})`,
     totalDatasetRows: parsedSamples.length,
     samplesTrained: trainData.length,
     samplesTested: testData.length,
@@ -585,7 +581,14 @@ async function runProductTraining() {
   console.log(`\nSaved trained product model to:\n- ${out1}\n- ${out2}`);
 }
 
-runProductTraining().catch((err) => {
-  console.error('Product model training failed:', err);
-  process.exit(1);
-});
+const isDirectRun =
+  typeof process !== 'undefined' &&
+  Array.isArray(process.argv) &&
+  process.argv[1]?.includes('train_product_model');
+
+if (isDirectRun) {
+  runProductTraining().catch((err) => {
+    console.error('Product model training failed:', err);
+    process.exit(1);
+  });
+}

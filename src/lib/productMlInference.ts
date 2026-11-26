@@ -7,6 +7,8 @@
 
 import trainedProductModelData from '../ml_product_model.json';
 import { MlProductResult, ProductAnalysisInput, RiskCategory } from '../types/index.ts';
+import { verifyGs1CheckDigit } from './riskEngine/codeAnalyzer.ts';
+import { areCurrenciesCompatible, normalizeReturnPolicyStatus } from './productValidator.ts';
 
 const REPLICA_KEYWORDS = [
   '1:1 replica',
@@ -82,7 +84,9 @@ export function extractProductFeatures(input: ProductAnalysisInput): {
   features: ExtractedProductFeatures;
   vector: number[];
 } {
-  const hasReferencePrice = input.referencePrice !== undefined && input.referencePrice > 0 ? 1 : 0;
+  const sameCurrency = areCurrenciesCompatible(input.currency, input.referenceCurrency);
+  const hasReferencePrice =
+    input.referencePrice !== undefined && input.referencePrice > 0 && sameCurrency ? 1 : 0;
 
   let discountRatio = 0;
   if (hasReferencePrice && input.listedPrice !== undefined && input.referencePrice! > 0) {
@@ -102,7 +106,9 @@ export function extractProductFeatures(input: ProductAnalysisInput): {
   const hasSellerRating = input.sellerRating !== undefined && input.sellerRating > 0 ? 1 : 0;
   const lowSellerRating = hasSellerRating && input.sellerRating! < 3.5 ? 1 : 0;
   const highSellerRating = hasSellerRating && input.sellerRating! >= 4.5 ? 1 : 0;
-  const noReturnPolicy = input.hasReturnPolicy === false ? 1 : 0;
+  const returnPolicyStatus = normalizeReturnPolicyStatus(input);
+  // Only explicit 'not_available' incurs noReturnPolicy; 'unknown' remains neutral (0)
+  const noReturnPolicy = returnPolicyStatus === 'not_available' ? 1 : 0;
 
   const textBlob = `${input.productName || ''} ${input.productDescription || ''}`.toLowerCase();
   const hasReplicaKeyword = REPLICA_KEYWORDS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
@@ -112,7 +118,7 @@ export function extractProductFeatures(input: ProductAnalysisInput): {
     : 0;
 
   const cleanedCode = (input.productIdentifier || '').replace(/[\s-]/g, '');
-  const hasValidGs1Barcode = /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(cleanedCode) ? 1 : 0;
+  const hasValidGs1Barcode = verifyGs1CheckDigit(cleanedCode) ? 1 : 0;
 
   const urlLower = (input.listingUrl || '').trim().toLowerCase();
   let hasRiskyListingUrl = 0;
@@ -210,6 +216,12 @@ export function predictProductRisk(input: ProductAnalysisInput): MlProductResult
     );
   }
 
+  const datasetLabel = (trainedProductModelData.dataset || '').toLowerCase();
+  const isSyntheticDataset =
+    datasetLabel.includes('curated') ||
+    datasetLabel.includes('synthetic') ||
+    datasetLabel.includes('product_listings_dataset.csv');
+
   return {
     productName: input.productName,
     isHighRisk,
@@ -219,17 +231,27 @@ export function predictProductRisk(input: ProductAnalysisInput): MlProductResult
     modelTrained: true,
     modelType: trainedProductModelData.modelType,
     datasetName: trainedProductModelData.dataset,
+    totalDatasetRows: trainedProductModelData.totalDatasetRows,
     trainingSamples: trainedProductModelData.samplesTrained,
+    samplesTested: trainedProductModelData.samplesTested,
+    isSyntheticDataset,
     metrics: trainedProductModelData.metrics,
     featuresExtracted: features,
     indicatorsFlagged,
-    disclaimer:
-      'Machine learning classification scores listing metadata, pricing variance, and seller signals from a curated 10,000-listing corpus. It is a caution indicator and cannot inspect physical goods.',
+    disclaimer: isSyntheticDataset
+      ? 'This product listing classifier is currently trained on a synthetic corpus (product_listings_dataset.csv). Its accuracy reflects synthetic training rules—not verified real-world counterfeit detection performance or physical product authenticity.'
+      : 'Machine learning classification evaluates listing metadata, pricing variance, and seller signals. It is a caution indicator for suspicious listings and does not inspect physical goods.',
     serviceAvailable: true,
   };
 }
 
 export function getProductModelMetadata() {
+  const datasetLabel = (trainedProductModelData.dataset || '').toLowerCase();
+  const isSyntheticDataset =
+    datasetLabel.includes('curated') ||
+    datasetLabel.includes('synthetic') ||
+    datasetLabel.includes('product_listings_dataset.csv');
+
   return {
     modelType: trainedProductModelData.modelType,
     dataset: trainedProductModelData.dataset,
@@ -237,6 +259,7 @@ export function getProductModelMetadata() {
     samplesTrained: trainedProductModelData.samplesTrained,
     samplesTested: trainedProductModelData.samplesTested,
     trainedAt: trainedProductModelData.trainedAt,
+    isSyntheticDataset,
     metrics: trainedProductModelData.metrics,
     featureCount: trainedProductModelData.features.length,
     features: trainedProductModelData.features,

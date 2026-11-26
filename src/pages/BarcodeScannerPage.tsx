@@ -12,9 +12,6 @@ import {
   Upload,
   Keyboard,
   AlertCircle,
-  CheckCircle2,
-  Lock,
-  ArrowRight,
   ShieldAlert,
   Loader2,
   StopCircle,
@@ -25,32 +22,88 @@ import { HistoryService } from '../lib/supabase/historyService';
 import { VerificationReport } from '../components/VerificationReport';
 import { SYNTHETIC_DEMO_CATALOG } from '../lib/riskEngine/codeAnalyzer';
 
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png']);
+const ALLOWED_EXTENSIONS = /\.(jpe?g|png)$/i;
+
 export const BarcodeScannerPage: React.FC = () => {
   const [activeMode, setActiveMode] = useState<'camera' | 'upload' | 'manual'>('manual');
   const [manualCode, setManualCode] = useState('');
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [currentResult, setCurrentResult] = useState<AssessmentResult | null>(null);
 
   const qrReaderRef = useRef<Html5Qrcode | null>(null);
+  const isCameraActiveRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const readerElementId = 'vbb-qr-reader-container';
 
-  // Cleanup camera on unmount
+  const cleanupScannerResources = async () => {
+    const instance = qrReaderRef.current;
+    if (!instance) {
+      isCameraActiveRef.current = false;
+      setIsCameraActive(false);
+      return;
+    }
+
+    try {
+      if (isCameraActiveRef.current || instance.isScanning) {
+        await instance.stop();
+      }
+    } catch (err) {
+      console.warn('Error stopping scanner:', err);
+    }
+
+    try {
+      instance.clear();
+    } catch {
+      // Container already clean or unmounted
+    }
+
+    qrReaderRef.current = null;
+    isCameraActiveRef.current = false;
+    setIsCameraActive(false);
+  };
+
+  // Cleanup camera & scanner resources on component unmount
   useEffect(() => {
     return () => {
-      if (qrReaderRef.current && isCameraActive) {
-        qrReaderRef.current.stop().catch(() => {});
+      const instance = qrReaderRef.current;
+      if (instance) {
+        const stopPromise =
+          isCameraActiveRef.current || instance.isScanning
+            ? instance.stop().catch(() => {})
+            : Promise.resolve();
+        stopPromise.finally(() => {
+          try {
+            instance.clear();
+          } catch {
+            // Ignore unmount cleanup errors
+          }
+          qrReaderRef.current = null;
+          isCameraActiveRef.current = false;
+        });
       }
     };
-  }, [isCameraActive]);
+  }, []);
+
+  const handleModeChange = async (nextMode: 'camera' | 'upload' | 'manual') => {
+    setCameraError(null);
+    if (nextMode !== activeMode) {
+      await cleanupScannerResources();
+      setActiveMode(nextMode);
+    }
+  };
 
   const handleStartCamera = async () => {
     setCameraError(null);
     setIsLoading(true);
 
     try {
-      const html5QrCode = new Html5Qrcode(readerElementId);
+      await cleanupScannerResources();
+      const html5QrCode = new Html5Qrcode(readerElementId, { verbose: false });
       qrReaderRef.current = html5QrCode;
 
       await html5QrCode.start(
@@ -60,9 +113,7 @@ export const BarcodeScannerPage: React.FC = () => {
           qrbox: { width: 250, height: 250 },
         },
         async (decodedText, decodedResult) => {
-          // Success callback
-          await html5QrCode.stop().catch(() => {});
-          setIsCameraActive(false);
+          await cleanupScannerResources();
           handleAnalyzeCode(decodedText, decodedResult?.result?.format?.formatName || 'Camera Scan');
         },
         () => {
@@ -70,43 +121,86 @@ export const BarcodeScannerPage: React.FC = () => {
         }
       );
 
+      isCameraActiveRef.current = true;
       setIsCameraActive(true);
     } catch (err: any) {
       console.warn('Camera start error:', err);
+      await cleanupScannerResources();
       setCameraError(
-        'Unable to access camera. Please verify camera permissions in your browser or use the Manual Entry fallback below.'
+        'Unable to access camera. Please verify camera permissions in your browser or use Image Upload / Manual Entry.'
       );
-      setIsCameraActive(false);
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleStopCamera = async () => {
-    if (qrReaderRef.current && isCameraActive) {
-      try {
-        await qrReaderRef.current.stop();
-      } catch (err) {
-        console.warn('Error stopping camera:', err);
-      }
-      setIsCameraActive(false);
-    }
+    await cleanupScannerResources();
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsLoading(true);
     setCameraError(null);
 
+    const mimeOk = !file.type || ALLOWED_MIME_TYPES.has(file.type.toLowerCase());
+    const extOk = ALLOWED_EXTENSIONS.test(file.name);
+    if (!mimeOk || !extOk) {
+      setCurrentResult(null);
+      setUploadedFileName(null);
+      setCameraError('Unsupported file type. Please upload a JPG, JPEG, or PNG image containing a QR code or barcode.');
+      e.target.value = '';
+      return;
+    }
+
+    if (file.size === 0 || file.size > MAX_UPLOAD_BYTES) {
+      setCurrentResult(null);
+      setUploadedFileName(null);
+      setCameraError(
+        file.size === 0
+          ? 'The selected image file is empty. Please choose a valid JPG, JPEG, or PNG image.'
+          : 'Image exceeds the 5MB upload limit. Please choose a smaller JPG, JPEG, or PNG file.'
+      );
+      e.target.value = '';
+      return;
+    }
+
+    setUploadedFileName(file.name);
+    setIsLoading(true);
+
+    let fileScanner: Html5Qrcode | null = null;
     try {
-      const html5QrCode = new Html5Qrcode(readerElementId);
-      const decodedText = await html5QrCode.scanFile(file, true);
-      await handleAnalyzeCode(decodedText, 'Image File Scan');
+      await cleanupScannerResources();
+      fileScanner = new Html5Qrcode(readerElementId, { verbose: false });
+      qrReaderRef.current = fileScanner;
+
+      const scanResult = await fileScanner.scanFileV2(file, false);
+      const formatLabel = scanResult.result?.format?.formatName
+        ? `Image Upload (${scanResult.result.format.formatName})`
+        : 'Image File Scan';
+
+      await handleAnalyzeCode(scanResult.decodedText, formatLabel);
     } catch (err: any) {
-      setCameraError('No readable QR code or product barcode detected in this image. Try entering the code manually.');
+      console.warn('Image barcode/QR scan error:', err);
+      setCurrentResult(null);
+      setCameraError(
+        'No readable QR code or 1D retail barcode was detected in this image. Ensure the code is sharp, well-lit, uncropped, or enter the digits manually.'
+      );
     } finally {
+      if (fileScanner) {
+        try {
+          fileScanner.clear();
+        } catch {
+          // Ignore clear failure
+        }
+        if (qrReaderRef.current === fileScanner) {
+          qrReaderRef.current = null;
+        }
+      }
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
       setIsLoading(false);
     }
   };
@@ -147,7 +241,7 @@ export const BarcodeScannerPage: React.FC = () => {
           Scan Retail Codes &amp; Packaging QR
         </h1>
         <p className="text-sm text-slate-400 max-w-2xl leading-relaxed">
-          Inspect 1D retail barcodes (UPC-A, EAN-13) and QR redirects safely. Verify GS1 check digits, screen for malicious web redirects, and cross-reference reference catalogs.
+          Inspect 1D retail barcodes (UPC-A, EAN-13) and QR redirects safely. Verify GS1 check digits, query live product registries (Open Food Facts, Open Beauty Facts, Open Products Facts, UPCitemdb), and screen QR links with our phishing ML detector.
         </p>
       </div>
 
@@ -165,10 +259,7 @@ export const BarcodeScannerPage: React.FC = () => {
       {/* Mode Switcher */}
       <div className="flex items-center gap-2 p-1 bg-slate-900 border border-slate-800 rounded-xl w-fit">
         <button
-          onClick={() => {
-            setActiveMode('manual');
-            handleStopCamera();
-          }}
+          onClick={() => handleModeChange('manual')}
           className={`flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg transition-colors ${
             activeMode === 'manual'
               ? 'bg-teal-400 text-slate-950 font-semibold shadow-sm'
@@ -180,10 +271,7 @@ export const BarcodeScannerPage: React.FC = () => {
         </button>
 
         <button
-          onClick={() => {
-            setActiveMode('camera');
-            setCameraError(null);
-          }}
+          onClick={() => handleModeChange('camera')}
           className={`flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg transition-colors ${
             activeMode === 'camera'
               ? 'bg-teal-400 text-slate-950 font-semibold shadow-sm'
@@ -195,10 +283,7 @@ export const BarcodeScannerPage: React.FC = () => {
         </button>
 
         <button
-          onClick={() => {
-            setActiveMode('upload');
-            handleStopCamera();
-          }}
+          onClick={() => handleModeChange('upload')}
           className={`flex items-center gap-2 px-4 py-2 text-xs font-medium rounded-lg transition-colors ${
             activeMode === 'upload'
               ? 'bg-teal-400 text-slate-950 font-semibold shadow-sm'
@@ -212,6 +297,14 @@ export const BarcodeScannerPage: React.FC = () => {
 
       {/* Scanner Interactive Container */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 space-y-6 shadow-xl">
+        {/* Persistent html5-qrcode mount so both live camera and image upload scanning always find #vbb-qr-reader-container */}
+        <div
+          id={readerElementId}
+          className={`w-full max-w-md mx-auto rounded-xl overflow-hidden bg-slate-950 border border-slate-800 ${
+            activeMode === 'camera' && isCameraActive ? 'min-h-[300px]' : 'hidden'
+          }`}
+        />
+
         {/* Mode A: Camera Scanner */}
         {activeMode === 'camera' && (
           <div className="space-y-4">
@@ -241,14 +334,6 @@ export const BarcodeScannerPage: React.FC = () => {
               )}
             </div>
 
-            {/* html5-qrcode element mount */}
-            <div
-              id={readerElementId}
-              className={`w-full max-w-md mx-auto rounded-xl overflow-hidden bg-slate-950 border border-slate-800 ${
-                isCameraActive ? 'min-h-[300px]' : 'hidden'
-              }`}
-            />
-
             {!isCameraActive && (
               <div className="p-8 border border-dashed border-slate-800 rounded-xl text-center space-y-3 bg-slate-950/40">
                 <div className="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center mx-auto text-slate-400">
@@ -267,19 +352,37 @@ export const BarcodeScannerPage: React.FC = () => {
           <div className="space-y-4">
             <div>
               <h3 className="text-sm font-semibold text-white">Upload Barcode / QR Image</h3>
-              <p className="text-xs text-slate-400">Select a clear photograph of a package barcode or QR code.</p>
+              <p className="text-xs text-slate-400">
+                Select a clear JPG, JPEG, or PNG image of a product barcode (UPC/EAN/ITF/Code-128) or QR code.
+              </p>
             </div>
 
             <label className="border-2 border-dashed border-slate-700 hover:border-teal-500 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer bg-slate-950/50 hover:bg-slate-950/80 transition-all space-y-3">
-              <Upload className="w-8 h-8 text-teal-400" />
+              {isLoading ? (
+                <Loader2 className="w-8 h-8 text-teal-400 animate-spin" />
+              ) : (
+                <Upload className="w-8 h-8 text-teal-400" />
+              )}
               <div className="text-xs text-slate-200">
-                <span className="font-semibold text-teal-300">Click to upload</span> or drag and drop image file
+                {isLoading ? (
+                  <span className="font-semibold text-teal-300">
+                    Decoding {uploadedFileName ? `"${uploadedFileName}"` : 'image'}...
+                  </span>
+                ) : (
+                  <>
+                    <span className="font-semibold text-teal-300">Click to upload</span> or choose an image file
+                  </>
+                )}
               </div>
-              <span className="text-[11px] text-slate-500 font-mono">PNG, JPG, WEBP up to 5MB</span>
+              <span className="text-[11px] text-slate-500 font-mono">
+                PNG, JPG, JPEG up to 5MB{uploadedFileName && !isLoading ? ` · Last file: ${uploadedFileName}` : ''}
+              </span>
               <input
+                ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept=".jpg,.jpeg,.png,image/jpeg,image/png"
                 onChange={handleFileUpload}
+                disabled={isLoading}
                 className="hidden"
               />
             </label>
@@ -335,7 +438,7 @@ export const BarcodeScannerPage: React.FC = () => {
         {/* Demo Test Presets */}
         <div className="pt-4 border-t border-slate-800/80 space-y-3">
           <div className="text-xs text-slate-400 font-medium">
-            Test with synthetic reference codes:
+            Quick Test Barcodes (Live DB lookups run automatically for valid GS1 barcodes; synthetic demo records are used only as offline fallback):
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {Object.values(SYNTHETIC_DEMO_CATALOG).map((demo) => (
@@ -374,6 +477,8 @@ export const BarcodeScannerPage: React.FC = () => {
             onReset={() => {
               setCurrentResult(null);
               setManualCode('');
+              setUploadedFileName(null);
+              setCameraError(null);
             }}
           />
         </div>

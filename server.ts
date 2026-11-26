@@ -13,6 +13,19 @@ import { RiskScoringEngine } from './src/lib/riskEngine/engine.ts';
 import { predictPhishing, getModelMetadata } from './src/lib/mlInference.ts';
 import { predictProductRisk, getProductModelMetadata } from './src/lib/productMlInference.ts';
 import { validateWebsiteUrl } from './src/lib/urlValidator.ts';
+import { validateProductInput } from './src/lib/productValidator.ts';
+import { extractProductMetadataFromHtml } from './src/lib/productMetadataExtractor.ts';
+import {
+  FetchTimeoutError,
+  FetchValidationError,
+  safeFetchPublicUrl,
+  SsrfBlockedError,
+} from './server/ssrfFetch.ts';
+import { lookupBarcodeProduct } from './server/barcodeLookupService.ts';
+import { verifyWebsiteDomain } from './server/domainVerificationService.ts';
+import { verifySellerInfo } from './server/sellerVerificationService.ts';
+import { compareMarketPrices } from './server/marketPriceService.ts';
+import { validateGs1BarcodeFormat } from './src/lib/riskEngine/codeAnalyzer.ts';
 import { AssessmentResult, WebsiteAnalysisInput, ProductAnalysisInput, CodeAnalysisInput } from './src/types/index.ts';
 
 dotenv.config();
@@ -111,12 +124,21 @@ app.post('/api/analyze/website', async (req: Request, res: Response) => {
       return;
     }
 
-    const result = RiskScoringEngine.assessWebsite({
-      ...input,
-      url: validation.normalizedUrl,
-    });
+    const domainVerification = await verifyWebsiteDomain(validation.normalizedUrl);
+
+    const result = RiskScoringEngine.assessWebsite(
+      {
+        ...input,
+        url: validation.normalizedUrl,
+      },
+      domainVerification
+    );
     res.json(result);
   } catch (error: any) {
+    if (error instanceof SsrfBlockedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
     console.error('Website analysis error:', error);
     res.status(500).json({ error: error.message || 'Analysis failed.' });
   }
@@ -164,12 +186,18 @@ app.get('/api/ml/model-info', (_req: Request, res: Response) => {
 app.post('/api/ml/predict-product', (req: Request, res: Response) => {
   try {
     const input: ProductAnalysisInput = req.body;
-    if (!input || !input.productName || typeof input.productName !== 'string') {
-      res.status(400).json({ error: 'Product name is required.' });
+    const validation = validateProductInput(input);
+    if (!validation.valid || !validation.normalizedInput) {
+      res.status(400).json({ error: validation.error || 'Invalid product listing input.' });
       return;
     }
 
-    const prediction = predictProductRisk(input);
+    if (validation.listingUrlHostname && isRestrictedHost(validation.listingUrlHostname)) {
+      res.status(403).json({ error: 'Security restriction: Private listing URL blocked.' });
+      return;
+    }
+
+    const prediction = predictProductRisk(validation.normalizedInput);
     res.json(prediction);
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Product ML prediction failed.' });
@@ -186,37 +214,258 @@ app.get('/api/ml/product-model-info', (_req: Request, res: Response) => {
   }
 });
 
-// 3. Product Analysis Endpoint
-app.post('/api/analyze/product', (req: Request, res: Response) => {
+// 3. Product Analysis Endpoint (reuses GS1-validated external barcode lookup when productIdentifier is a GS1 barcode)
+app.post('/api/analyze/product', async (req: Request, res: Response) => {
   try {
     const input: ProductAnalysisInput = req.body;
-    if (!input || !input.productName || typeof input.productName !== 'string') {
-      res.status(400).json({ error: 'Product name is required.' });
+    const validation = validateProductInput(input);
+    if (!validation.valid || !validation.normalizedInput) {
+      res.status(400).json({ error: validation.error || 'Invalid product listing input.' });
       return;
     }
 
-    if (input.listingUrl) {
-      try {
-        const parsed = new URL(input.listingUrl.trim().startsWith('http') ? input.listingUrl : 'https://' + input.listingUrl);
-        if (isRestrictedHost(parsed.hostname)) {
-          res.status(403).json({ error: 'Security restriction: Private listing URL blocked.' });
-          return;
-        }
-      } catch {
-        // Allow evaluation with note
-      }
+    if (validation.listingUrlHostname && isRestrictedHost(validation.listingUrlHostname)) {
+      res.status(403).json({ error: 'Security restriction: Private listing URL blocked.' });
+      return;
     }
 
-    const result = RiskScoringEngine.assessProduct(input);
+    let barcodeLookup = undefined;
+    const identifier = validation.normalizedInput.productIdentifier;
+    const barcodePromise = (async () => {
+      if (identifier) {
+        const gs1 = validateGs1BarcodeFormat(identifier);
+        if (gs1.isStandardLength && gs1.isValidChecksum) {
+          return lookupBarcodeProduct(gs1.cleaned);
+        }
+      }
+      return undefined;
+    })();
+
+    const sellerPromise =
+      validation.normalizedInput.listingUrl ||
+      validation.normalizedInput.sellerName ||
+      validation.normalizedInput.sellerRating !== undefined
+        ? verifySellerInfo(validation.normalizedInput)
+        : Promise.resolve(undefined);
+
+    const marketPricePromise = compareMarketPrices(validation.normalizedInput);
+
+    const [resolvedBarcode, sellerVerification, marketPriceComparison] = await Promise.all([
+      barcodePromise,
+      sellerPromise,
+      marketPricePromise,
+    ]);
+    barcodeLookup = resolvedBarcode;
+
+    const result = RiskScoringEngine.assessProduct(
+      validation.normalizedInput,
+      barcodeLookup,
+      sellerVerification,
+      marketPriceComparison
+    );
     res.json(result);
   } catch (error: any) {
+    if (error instanceof SsrfBlockedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FetchValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
     console.error('Product analysis error:', error);
     res.status(500).json({ error: error.message || 'Product analysis failed.' });
   }
 });
 
-// 4. Code & Barcode Analysis Endpoint
-app.post('/api/analyze/code', (req: Request, res: Response) => {
+// 3a-1. Dedicated Market Price Comparison Endpoint
+app.post('/api/product/market-prices', async (req: Request, res: Response) => {
+  try {
+    const input: ProductAnalysisInput = req.body;
+    const validation = validateProductInput(input);
+    if (!validation.valid || !validation.normalizedInput) {
+      res.status(400).json({ error: validation.error || 'Invalid product listing input.' });
+      return;
+    }
+
+    if (validation.listingUrlHostname && isRestrictedHost(validation.listingUrlHostname)) {
+      res.status(403).json({ error: 'Security restriction: Private listing URL blocked.' });
+      return;
+    }
+
+    const comparison = await compareMarketPrices(validation.normalizedInput);
+    res.json(comparison);
+  } catch (error: any) {
+    if (error instanceof SsrfBlockedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FetchValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    console.error('Market price comparison error:', error);
+    res.status(500).json({ error: error?.message || 'Market price comparison failed.' });
+  }
+});
+
+// 3a. Dedicated Seller Verification Endpoint
+app.post('/api/seller/verify', async (req: Request, res: Response) => {
+  try {
+    const body = (req.body || {}) as Partial<ProductAnalysisInput>;
+
+    if (body.listingUrl && typeof body.listingUrl === 'string' && body.listingUrl.trim()) {
+      const urlCheck = validateWebsiteUrl(body.listingUrl);
+      if (!urlCheck.valid || !urlCheck.hostname || !urlCheck.normalizedUrl) {
+        res.status(400).json({
+          error: urlCheck.error || 'Invalid listing URL. Please enter a valid website address.',
+        });
+        return;
+      }
+      if (isRestrictedHost(urlCheck.hostname)) {
+        res.status(403).json({
+          error: 'Security restriction: Private, loopback, or metadata endpoints are blocked.',
+        });
+        return;
+      }
+      body.listingUrl = urlCheck.normalizedUrl;
+    }
+
+    if (body.sellerRating !== undefined && body.sellerRating !== null) {
+      const ratingNum = Number(body.sellerRating);
+      if (!Number.isFinite(ratingNum) || ratingNum < 0 || ratingNum > 5) {
+        res.status(400).json({ error: 'Seller rating must be a number between 0 and 5.' });
+        return;
+      }
+      body.sellerRating = ratingNum;
+    }
+
+    const sellerResult = await verifySellerInfo(body);
+    res.json(sellerResult);
+  } catch (error: any) {
+    if (error instanceof SsrfBlockedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FetchValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    console.error('Seller verification error:', error);
+    res.status(500).json({ error: error?.message || 'Seller verification failed.' });
+  }
+});
+
+// 3b. Fetch Public Structured Product Metadata from Listing URL
+app.post('/api/product/fetch-details', async (req: Request, res: Response) => {
+  try {
+    const rawUrl = req.body?.url;
+    if (!rawUrl || typeof rawUrl !== 'string') {
+      res.status(400).json({ error: 'Valid Listing URL is required.' });
+      return;
+    }
+
+    const urlValidation = validateWebsiteUrl(rawUrl);
+    if (!urlValidation.valid || !urlValidation.normalizedUrl) {
+      res.status(400).json({
+        error: urlValidation.error || 'Invalid URL. Please enter a valid website address.',
+      });
+      return;
+    }
+
+    const fetched = await safeFetchPublicUrl(urlValidation.normalizedUrl, {
+      timeoutMs: 10_000,
+      maxRedirects: 5,
+      maxBytes: 2_500_000,
+    });
+
+    if (
+      fetched.contentType &&
+      !fetched.contentType.includes('text/html') &&
+      !fetched.contentType.includes('application/xhtml+xml') &&
+      !fetched.contentType.includes('application/ld+json') &&
+      !fetched.contentType.includes('application/json') &&
+      !fetched.contentType.includes('text/plain')
+    ) {
+      res.json({
+        success: false,
+        url: urlValidation.normalizedUrl,
+        finalUrl: fetched.finalUrl,
+        statusCode: fetched.statusCode,
+        message: `Unsupported content type (${fetched.contentType}). Expected a product web page. Please enter product details manually.`,
+        fieldSources: {},
+        warnings: [],
+      });
+      return;
+    }
+
+    const extractedResult = extractProductMetadataFromHtml(
+      fetched.body,
+      urlValidation.normalizedUrl,
+      fetched.finalUrl,
+      fetched.statusCode
+    );
+    res.json(extractedResult);
+  } catch (error: any) {
+    if (error instanceof FetchValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    if (error instanceof SsrfBlockedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FetchTimeoutError) {
+      res.status(504).json({ error: error.message });
+      return;
+    }
+    res.status(502).json({
+      error: error?.message || 'Could not retrieve metadata from this website. You can continue with manual entry.',
+    });
+  }
+});
+
+// 3c. Dedicated External Barcode Product Lookup Endpoint (GS1 Modulo-10 checked before external queries)
+async function handleBarcodeLookupRequest(rawCode: unknown, res: Response) {
+  if (!rawCode || typeof rawCode !== 'string' || !rawCode.trim()) {
+    res.status(400).json({ error: 'A barcode digits string is required.' });
+    return;
+  }
+
+  const gs1 = validateGs1BarcodeFormat(rawCode);
+  if (!gs1.isStandardLength || !gs1.isValidChecksum) {
+    const invalidLookup = await lookupBarcodeProduct(rawCode);
+    res.status(400).json({
+      error: invalidLookup.message,
+      lookup: invalidLookup,
+    });
+    return;
+  }
+
+  const lookup = await lookupBarcodeProduct(gs1.cleaned);
+  res.json(lookup);
+}
+
+app.post('/api/barcode/lookup', async (req: Request, res: Response) => {
+  try {
+    await handleBarcodeLookupRequest(req.body?.code, res);
+  } catch (error: any) {
+    console.error('Barcode lookup error:', error);
+    res.status(500).json({ error: error?.message || 'Barcode database lookup failed.' });
+  }
+});
+
+app.get('/api/barcode/lookup/:code', async (req: Request, res: Response) => {
+  try {
+    await handleBarcodeLookupRequest(req.params.code, res);
+  } catch (error: any) {
+    console.error('Barcode lookup error:', error);
+    res.status(500).json({ error: error?.message || 'Barcode database lookup failed.' });
+  }
+});
+
+// 4. Code & Barcode Analysis Endpoint (performs GS1 validation and real external DB lookup for valid GTINs)
+app.post('/api/analyze/code', async (req: Request, res: Response) => {
   try {
     const input: CodeAnalysisInput = req.body;
     if (!input || !input.code || typeof input.code !== 'string') {
@@ -224,7 +473,13 @@ app.post('/api/analyze/code', (req: Request, res: Response) => {
       return;
     }
 
-    const result = RiskScoringEngine.assessCode(input);
+    let barcodeLookup = undefined;
+    const gs1 = validateGs1BarcodeFormat(input.code);
+    if (gs1.isStandardLength && gs1.isValidChecksum) {
+      barcodeLookup = await lookupBarcodeProduct(gs1.cleaned);
+    }
+
+    const result = RiskScoringEngine.assessCode(input, barcodeLookup);
     res.json(result);
   } catch (error: any) {
     console.error('Code analysis error:', error);
