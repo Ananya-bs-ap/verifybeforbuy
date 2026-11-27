@@ -224,6 +224,9 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
             </div>
             <VerificationReport
               result={scanResult}
+              onSave={(updated) => {
+                void HistoryService.saveRecord(updated);
+              }}
               onReset={() => {
                 setScanResult(null);
                 setQuickUrl('');
@@ -398,7 +401,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
               </div>
               <h3 className="text-base font-semibold text-white">Explainable Risk Reports</h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Objective natural language summaries generated via server-side Gemini 3.8 Flash, or deterministic fallback without external keys.
+                Objective natural language summaries generated via server-side Gemini 4 Hydrogen, or deterministic fallback without external keys.
               </p>
             </div>
             <button

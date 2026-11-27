@@ -56,6 +56,10 @@ export const VerificationReport: React.FC<VerificationReportProps> = ({
   const [aiProvider, setAiProvider] = useState<'gemini' | 'deterministic-fallback' | undefined>(
     result.aiExplanationProvider
   );
+  const [aiModel, setAiModel] = useState<string | undefined>(result.aiExplanationModel);
+  const [aiFallbackReason, setAiFallbackReason] = useState<string | undefined>(
+    result.aiExplanationFallbackReason
+  );
   const [isExplaining, setIsExplaining] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -65,8 +69,12 @@ export const VerificationReport: React.FC<VerificationReportProps> = ({
       const res = await ApiService.requestAiExplanation(result);
       setAiExplanation(res.explanation);
       setAiProvider(res.provider);
+      setAiModel(res.model);
+      setAiFallbackReason(res.fallbackReason);
       result.aiExplanation = res.explanation;
       result.aiExplanationProvider = res.provider;
+      result.aiExplanationModel = res.model;
+      result.aiExplanationFallbackReason = res.fallbackReason;
       if (onSave) onSave(result);
     } catch (err) {
       console.error('Explanation request failed:', err);
@@ -325,6 +333,12 @@ Disclaimer: ${result.disclaimer}`;
               <span>100 (High)</span>
             </div>
           </div>
+          {result.scoreBreakdown && (
+            <div className="text-[11px] text-slate-400 pt-3 mt-3 border-t border-slate-200 font-mono tabular-nums">
+              Base +{result.scoreBreakdown.baselineScore} · Indicators +{result.scoreBreakdown.indicatorsAppliedTotal} · Signals -{result.scoreBreakdown.appliedPositiveDeduction}
+              {result.scoreBreakdown.deductionsZeroedByCriticalRisk ? ' (halted by high-risk flag)' : ''}
+            </div>
+          )}
         </div>
 
         {/* Category Card */}
@@ -758,7 +772,21 @@ Disclaimer: ${result.disclaimer}`;
           {/* 5. Threat Intelligence Feeds Row */}
           {(() => {
             const threat = result.domainVerification.threatIntel;
+            const totalFeeds = threat.providers.length;
+            const checkedFeeds = threat.providers.filter((p) => p.checked).length;
+            const hasUnavailableFeeds = threat.providers.some((p) => p.status === 'unavailable');
             const badge = verificationBadge(threat.status);
+            const badgeClassName =
+              threat.status === 'verified' && hasUnavailableFeeds
+                ? 'bg-indigo-100 text-indigo-800 border-indigo-200'
+                : badge.className;
+            const badgeText = threat.listed
+              ? 'Flagged'
+              : threat.status === 'verified'
+                ? hasUnavailableFeeds
+                  ? `Partial (${checkedFeeds}/${totalFeeds} Checked)`
+                  : `Not Listed (${checkedFeeds}/${totalFeeds} Checked)`
+                : badge.label;
             return (
               <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -766,8 +794,8 @@ Disclaimer: ${result.disclaimer}`;
                     <Shield className="w-4 h-4 text-indigo-600" />
                     <span>Phishing &amp; Malicious Threat Intelligence</span>
                   </div>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${badge.className}`}>
-                    {threat.listed ? 'Flagged' : badge.label}
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${badgeClassName}`}>
+                    {badgeText}
                   </span>
                 </div>
 
@@ -965,10 +993,18 @@ Disclaimer: ${result.disclaimer}`;
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between text-xs font-semibold text-slate-300 border-b border-slate-800/80 pb-2">
                   <span className="flex items-center gap-1.5 text-violet-300 font-bold">
                     <Layers className="w-3.5 h-3.5" />
-                    Holdout Evaluation Metrics ({(result.mlProductPrediction.samplesTested ?? 0).toLocaleString()} Test Listings)
+                    {result.mlProductPrediction.isSyntheticDataset
+                      ? `Synthetic-Data Holdout Metrics (${(result.mlProductPrediction.samplesTested ?? 0).toLocaleString()} Test Listings)`
+                      : `Holdout Evaluation Metrics (${(result.mlProductPrediction.samplesTested ?? 0).toLocaleString()} Test Listings)`}
                   </span>
                   <span className="text-[11px] font-mono text-slate-400">
                     Train: {(result.mlProductPrediction.trainingSamples ?? 0).toLocaleString()} · Test: {(result.mlProductPrediction.samplesTested ?? 0).toLocaleString()}
+                    {result.mlProductPrediction.metrics.rocAuc !== undefined
+                      ? ` · ROC-AUC: ${(result.mlProductPrediction.metrics.rocAuc * 100).toFixed(2)}%`
+                      : ''}
+                    {result.mlProductPrediction.metrics.prAuc !== undefined
+                      ? ` · PR-AUC: ${(result.mlProductPrediction.metrics.prAuc * 100).toFixed(2)}%`
+                      : ''}
                   </span>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
@@ -1740,12 +1776,17 @@ Disclaimer: ${result.disclaimer}`;
       {/* 5. AI Explanation Panel */}
       <div className="p-6 bg-gradient-to-br from-indigo-50/80 to-violet-50/50 border border-indigo-100 rounded-2xl space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Sparkles className="w-4 h-4 text-indigo-600" />
             <h4 className="font-bold text-sm text-slate-900">AI Plain-Language Risk Explanation</h4>
-            {aiProvider && (
-              <span className="text-[11px] text-slate-500 font-mono">
-                · {aiProvider === 'gemini' ? 'Gemini 3.8 Flash' : 'Standard Analysis'}
+            {aiProvider === 'gemini' && (
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border bg-indigo-100 text-indigo-800 border-indigo-200 font-semibold">
+                Source: Gemini AI ({aiModel || 'gemini-4-hydrogen'})
+              </span>
+            )}
+            {aiProvider === 'deterministic-fallback' && (
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full border bg-amber-100 text-amber-800 border-amber-200 font-semibold">
+                Source: Deterministic Fallback (Gemini Unavailable)
               </span>
             )}
           </div>
@@ -1763,12 +1804,19 @@ Disclaimer: ${result.disclaimer}`;
         </div>
 
         {aiExplanation ? (
-          <div className="text-xs text-slate-700 leading-relaxed whitespace-pre-line border-t border-indigo-100 pt-3">
-            {aiExplanation}
+          <div className="space-y-2 border-t border-indigo-100 pt-3">
+            {aiProvider === 'deterministic-fallback' && aiFallbackReason && (
+              <div className="text-[11px] text-amber-800 bg-amber-50/80 border border-amber-200 rounded-lg px-3 py-1.5">
+                Fallback note: {aiFallbackReason}. Displaying deterministic summary grounded in the verified assessment signals above.
+              </div>
+            )}
+            <div className="text-xs text-slate-700 leading-relaxed whitespace-pre-line">
+              {aiExplanation}
+            </div>
           </div>
         ) : (
           <p className="text-xs text-slate-600">
-            Click &ldquo;Generate AI Explanation&rdquo; to receive an objective summary of these findings powered by Gemini AI.
+            Click &ldquo;Generate AI Explanation&rdquo; to receive an objective summary of these findings powered by Gemini AI (with automatic deterministic fallback if unavailable).
           </p>
         )}
       </div>

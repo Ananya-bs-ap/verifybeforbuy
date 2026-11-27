@@ -322,6 +322,8 @@ export class ApiService {
   public static async requestAiExplanation(result: AssessmentResult): Promise<{
     explanation: string;
     provider: 'gemini' | 'deterministic-fallback';
+    model?: string;
+    fallbackReason?: string;
   }> {
     try {
       const response = await fetch('/api/explain', {
@@ -339,8 +341,9 @@ export class ApiService {
 
     return {
       explanation:
-        'This assessment evaluates observable signals against known risk indicators. A low price or unknown domain requires diligence, but risk assessment is not physical proof of counterfeiting or fraud. Always verify returns and use secure payment methods.',
+        `Based on the calculated risk score of ${result.score}/100 (${result.category.toUpperCase()} risk), this assessment evaluates observable signals against known risk indicators. A low price, unknown domain, or missing record requires diligence, but risk assessment is not physical proof of counterfeiting or fraud. Always verify return terms and use payment methods with buyer dispute protection.`,
       provider: 'deterministic-fallback',
+      fallbackReason: 'Backend /api/explain endpoint unreachable; client fallback displayed',
     };
   }
 }

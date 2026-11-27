@@ -48,6 +48,74 @@ export function isValidDomainName(hostname: string): boolean {
   return validTld;
 }
 
+export const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
+  'co.uk',
+  'org.uk',
+  'ac.uk',
+  'gov.uk',
+  'me.uk',
+  'com.au',
+  'net.au',
+  'org.au',
+  'co.in',
+  'net.in',
+  'org.in',
+  'firm.in',
+  'gen.in',
+  'ind.in',
+  'co.jp',
+  'ne.jp',
+  'or.jp',
+  'ac.jp',
+  'go.jp',
+  'com.br',
+  'org.br',
+  'net.br',
+  'co.nz',
+  'co.za',
+  'com.sg',
+  'com.my',
+  'com.mx',
+  'com.tr',
+  'co.kr',
+  'com.tw',
+  'com.hk',
+  'co.id',
+  'com.ar',
+  'com.co',
+  'com.pe',
+  'com.ph',
+  'com.vn',
+  'com.eg',
+  'com.sa',
+  'co.th',
+  'com.be',
+]);
+
+/**
+ * Derive the registrable apex domain cleanly, preserving multi-label public suffixes
+ * such as .co.uk, .co.jp, .co.in, and .com.au.
+ */
+export function getRegistrableDomain(rawHostname: string): string {
+  const host = (rawHostname || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.+$/, '');
+  if (!host || isValidIpv4(host) || host.includes(':')) {
+    return host;
+  }
+  const parts = host.split('.').filter(Boolean);
+  if (parts.length <= 2) {
+    return parts.join('.');
+  }
+  const lastTwo = parts.slice(-2).join('.');
+  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join('.');
+  }
+  return lastTwo;
+}
+
 export function validateWebsiteUrl(rawInput: string): UrlValidationResult {
   const trimmed = (rawInput || '').trim();
 

@@ -3,7 +3,7 @@
  * Redesigned with a vibrant, human-crafted warm SaaS theme.
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Shield,
   Globe,
@@ -14,19 +14,73 @@ import {
   Sparkles,
   ArrowRight,
   Key,
+  LogIn,
+  LogOut,
+  UserPlus,
+  User as UserIcon,
 } from 'lucide-react';
 import { WebsiteCheckerPage } from './pages/WebsiteCheckerPage';
 import { ProductCheckerPage } from './pages/ProductCheckerPage';
 import { BarcodeScannerPage } from './pages/BarcodeScannerPage';
 import { HistoryDashboardPage } from './pages/HistoryDashboardPage';
 import { AboutPage } from './pages/AboutPage';
+import { LoginPage, RegisterPage, UpdatePasswordModal } from './pages/AuthPages';
+import { AuthUserProfile } from './types';
+import { AuthService, detectPasswordRecoveryInUrl } from './lib/supabase/authService';
 
-export type NavTab = 'home' | 'website' | 'product' | 'scanner' | 'history' | 'about';
+export type NavTab =
+  | 'home'
+  | 'website'
+  | 'product'
+  | 'scanner'
+  | 'history'
+  | 'about'
+  | 'login'
+  | 'register';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUserProfile | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [showPasswordRecoveryModal, setShowPasswordRecoveryModal] = useState(() =>
+    detectPasswordRecoveryInUrl()
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    AuthService.getSessionProfile().then(({ user }) => {
+      if (!active) return;
+      setAuthUser(user);
+      setAuthLoading(false);
+    });
+
+    const { unsubscribe } = AuthService.onAuthStateChange((event, user) => {
+      if (!active) return;
+      setAuthUser(user);
+      setAuthLoading(false);
+      if (event === 'PASSWORD_RECOVERY') {
+        setShowPasswordRecoveryModal(true);
+      }
+      if (event === 'SIGNED_OUT') {
+        setShowPasswordRecoveryModal(false);
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    await AuthService.signOut();
+    setAuthUser(null);
+    setShowPasswordRecoveryModal(false);
+    setMobileMenuOpen(false);
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans selection:bg-indigo-500 selection:text-white">
@@ -92,15 +146,64 @@ export default function App() {
               </button>
             </nav>
 
-            {/* Right Action: API Key Guide */}
-            <div className="hidden sm:flex items-center gap-3">
+            {/* Right Actions: API Key Guide + Auth Profile / Sign In */}
+            <div className="hidden sm:flex items-center gap-2.5">
               <button
                 onClick={() => setShowApiKeyModal(true)}
-                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-colors"
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-xl transition-colors"
+                title="Gemini API Key Setup"
               >
                 <Key className="w-3.5 h-3.5 text-indigo-600" />
-                <span>Gemini API Key Setup</span>
+                <span className="hidden xl:inline">Gemini API Key</span>
               </button>
+
+              {authUser ? (
+                <div className="flex items-center gap-2 pl-2 pr-1.5 py-1 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-indigo-600 to-violet-600 text-white text-xs font-bold flex items-center justify-center shrink-0">
+                    {(authUser.displayName || authUser.email || 'U').charAt(0).toUpperCase()}
+                  </div>
+                  <div className="hidden md:block leading-tight max-w-[140px] truncate pr-1">
+                    <div className="text-xs font-bold text-slate-900 truncate">
+                      {authUser.displayName}
+                    </div>
+                    <div className="text-[10px] text-slate-500 truncate">{authUser.email}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-colors"
+                    title="Sign Out"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              ) : (
+                !authLoading && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('login')}
+                      className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border transition-colors ${
+                        activeTab === 'login'
+                          ? 'text-indigo-700 bg-indigo-50 border-indigo-300'
+                          : 'text-slate-700 bg-white hover:bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>Sign In</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('register')}
+                      className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 rounded-xl shadow-xs transition-all"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Register</span>
+                    </button>
+                  </div>
+                )
+              )}
             </div>
 
             {/* Mobile Toggle */}
@@ -161,6 +264,50 @@ export default function App() {
               <Key className="w-4 h-4" />
               <span>Gemini API Key Guide</span>
             </button>
+
+            <div className="pt-2 border-t border-slate-100 space-y-2">
+              {authUser ? (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white text-xs font-bold flex items-center justify-center shrink-0">
+                      <UserIcon className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-slate-900 truncate">
+                        {authUser.displayName}
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">{authUser.email}</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="px-3 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg shrink-0"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setActiveTab('login'); setMobileMenuOpen(false); }}
+                    className="px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center justify-center gap-1.5"
+                  >
+                    <LogIn className="w-3.5 h-3.5" />
+                    <span>Sign In</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setActiveTab('register'); setMobileMenuOpen(false); }}
+                    className="px-3 py-2 text-xs font-bold text-white bg-gradient-to-r from-indigo-600 to-violet-600 rounded-xl flex items-center justify-center gap-1.5"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Register</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -313,13 +460,46 @@ export default function App() {
         )}
 
         {activeTab === 'history' && (
-          <div className="py-8"><HistoryDashboardPage onNavigate={(tab: any) => setActiveTab(tab)} /></div>
+          <div className="py-8">
+            <HistoryDashboardPage
+              authUser={authUser}
+              onNavigate={(tab: any) => setActiveTab(tab)}
+            />
+          </div>
         )}
 
         {activeTab === 'about' && (
           <div className="py-8"><AboutPage onNavigate={(tab: any) => setActiveTab(tab)} /></div>
         )}
+
+        {activeTab === 'login' && (
+          <div className="py-8">
+            <LoginPage
+              onNavigate={(tab: any) => setActiveTab(tab)}
+              onAuthSuccess={(user) => setAuthUser(user)}
+            />
+          </div>
+        )}
+
+        {activeTab === 'register' && (
+          <div className="py-8">
+            <RegisterPage
+              onNavigate={(tab: any) => setActiveTab(tab)}
+              onAuthSuccess={(user) => setAuthUser(user)}
+            />
+          </div>
+        )}
       </main>
+
+      {showPasswordRecoveryModal && (
+        <UpdatePasswordModal
+          onComplete={(updatedUser) => {
+            if (updatedUser) setAuthUser(updatedUser);
+            setShowPasswordRecoveryModal(false);
+          }}
+          onCancel={() => setShowPasswordRecoveryModal(false)}
+        />
+      )}
 
       {/* Gemini API Key Guide Modal */}
       {showApiKeyModal && (
@@ -339,7 +519,7 @@ export default function App() {
 
             <div className="space-y-3 text-xs text-slate-600 leading-relaxed">
               <p>
-                <strong>VerifyBeforeBuy AI</strong> uses Google Gemini 3.8 Flash for intelligent, plain-language risk explanations.
+                <strong>VerifyBeforeBuy AI</strong> uses Google Gemini 4 Hydrogen (<code>gemini-4-hydrogen</code>) for intelligent, plain-language risk explanations.
               </p>
               <div className="p-3.5 bg-indigo-50/70 border border-indigo-100 rounded-xl space-y-2">
                 <strong className="text-indigo-950 block">How to provide your Gemini API Key:</strong>

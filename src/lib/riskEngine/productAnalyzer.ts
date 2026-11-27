@@ -18,6 +18,10 @@ import {
 } from '../../types';
 import { validateGs1BarcodeFormat } from './codeAnalyzer';
 import { areCurrenciesCompatible, normalizeReturnPolicyStatus } from '../productValidator';
+import {
+  detectUnverifiedAuthorityClaims,
+  GENERIC_SELLER_PATTERNS,
+} from '../productFeatureExtractor';
 
 interface AnalyzedProductResult {
   indicators: RiskIndicator[];
@@ -105,9 +109,9 @@ export function compareProductWithBarcodeDb(
       positiveSignals.push({
         id: 'barcode-brand-match',
         name: `Live Barcode Database Brand Alignment (${dbBrandRaw})`,
-        description: `Entered brand aligns with ${sourceLabel} record for barcode ${dbProduct.code}. (Note: database alignment does not prove physical item authenticity).`,
+        description: `Entered brand aligns with ${sourceLabel} record for barcode ${dbProduct.code}. (Note: catalog alignment never proves physical item authenticity, as barcodes can be copied).`,
         isVerified: true,
-        scoreDeduction: 5,
+        scoreDeduction: 2,
       });
     }
   }
@@ -143,9 +147,9 @@ export function compareProductWithBarcodeDb(
       positiveSignals.push({
         id: 'barcode-name-match',
         name: `Live Barcode Database Title Overlap (${sourceLabel})`,
-        description: `Listing title aligns with ${sourceLabel} product entry "${dbProduct.productName}". (Database records cannot verify physical item condition or authenticity).`,
+        description: `Listing title aligns with ${sourceLabel} product entry "${dbProduct.productName}". (Catalog metadata cannot verify physical item condition or authenticity).`,
         isVerified: true,
-        scoreDeduction: 4,
+        scoreDeduction: 2,
       });
     }
   }
@@ -199,6 +203,13 @@ export function analyzeProductListing(
     unverifiedAspects.push('Official Manufacturer Suggested Retail Price (MSRP) baseline');
   }
 
+  const authorityClaims = detectUnverifiedAuthorityClaims(input);
+  if (authorityClaims.length > 0) {
+    unverifiedAspects.push(
+      `Unverified listing claim(s) (${authorityClaims.join(', ')}): seller warranty, seal, or authorization assertions do not establish genuine manufacturing.`
+    );
+  }
+
   // 2. Price Analysis (Strict Anti-Bias & Same-Currency Logic)
   const priceCurrency = (input.currency || input.referenceCurrency || 'USD').toUpperCase();
   if (input.listedPrice !== undefined && input.referencePrice !== undefined && input.referencePrice > 0) {
@@ -250,7 +261,7 @@ export function analyzeProductListing(
     unverifiedAspects.push('Merchant / Seller Identity is unprovided');
   } else {
     const sName = input.sellerName.toLowerCase();
-    const isGenericAnonymous = ['store123', 'deals-shop', 'seller', 'user99', 'discount_outlet'].some(g => sName.includes(g));
+    const isGenericAnonymous = GENERIC_SELLER_PATTERNS.some((g) => sName.includes(g));
 
     if (isGenericAnonymous) {
       indicators.push({
@@ -280,10 +291,10 @@ export function analyzeProductListing(
       } else if (input.sellerRating >= 4.7) {
         positiveSignals.push({
           id: 'high-reported-rating',
-          name: 'Reported High Positive Feedback',
-          description: `Reported feedback rating of ${input.sellerRating} / 5 (note: unverified self-report).`,
+          name: 'Reported High Positive Feedback (Unverified)',
+          description: `Reported feedback rating of ${input.sellerRating} / 5 (unverified self-report; cannot independently lower risk or establish product authenticity).`,
           isVerified: false,
-          scoreDeduction: 5,
+          scoreDeduction: 0,
         });
       }
     }
@@ -362,9 +373,9 @@ export function analyzeProductListing(
       positiveSignals.push({
         id: 'valid-identifier-format',
         name: `Valid GS1 Modulo-10 Barcode (${gs1.formatLabel})`,
-        description: `Identifier "${gs1.cleaned}" matches ${gs1.formatLabel} specification and passed GS1 Modulo-10 check-digit verification. (Note: physical packaging verification is still required because real barcodes can be copied).`,
+        description: `Identifier "${gs1.cleaned}" matches ${gs1.formatLabel} specification and passed GS1 Modulo-10 check-digit verification. Real barcodes are routinely copied onto counterfeit goods, so valid digit formatting does not establish authenticity or reduce risk.`,
         isVerified: true,
-        scoreDeduction: 8,
+        scoreDeduction: 0,
       });
 
       if (barcodeLookup) {

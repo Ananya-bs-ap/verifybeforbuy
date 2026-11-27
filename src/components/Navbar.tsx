@@ -14,7 +14,9 @@ export type NavTab =
   | 'scanner'
   | 'history'
   | 'how-it-works'
-  | 'about';
+  | 'about'
+  | 'login'
+  | 'register';
 
 interface NavbarProps {
   activeTab: NavTab;

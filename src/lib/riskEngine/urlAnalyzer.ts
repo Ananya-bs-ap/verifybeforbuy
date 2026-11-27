@@ -8,7 +8,12 @@
  */
 
 import { RiskIndicator, PositiveSignal } from '../../types';
-import { isValidDomainName, isValidIpv4, isValidIpv6 } from '../urlValidator';
+import {
+  getRegistrableDomain,
+  isValidDomainName,
+  isValidIpv4,
+  isValidIpv6,
+} from '../urlValidator';
 
 interface AnalyzedUrlResult {
   indicators: RiskIndicator[];
@@ -17,21 +22,257 @@ interface AnalyzedUrlResult {
   unverifiedAspects: string[];
 }
 
-const COMMON_TARGETED_BRANDS = [
+export const COMMON_TARGETED_BRANDS = [
   'amazon', 'apple', 'paypal', 'nike', 'rolex', 'sephora', 'target',
   'walmart', 'bestbuy', 'ebay', 'gucci', 'louisvuitton', 'chanel',
-  'nordstrom', 'costco', 'aliexpress', 'zara', 'adidas', 'samsung'
-];
+  'nordstrom', 'costco', 'aliexpress', 'zara', 'adidas', 'samsung',
+] as const;
 
 const HIGH_ABUSE_TLDS = new Set([
-  'top', 'xyz', 'click', 'buzz', 'work', 'rest', 'fit', 'surf', 'gq', 'cf', 'ml', 'tk', 'loan', 'racing'
+  'top', 'xyz', 'click', 'buzz', 'work', 'rest', 'fit', 'surf', 'gq', 'cf', 'ml', 'tk', 'loan', 'racing',
 ]);
 
-const TRUSTED_DOMAINS = new Set([
-  'amazon.com', 'apple.com', 'paypal.com', 'nike.com', 'target.com',
-  'walmart.com', 'bestbuy.com', 'ebay.com', 'nordstrom.com', 'costco.com',
-  'samsung.com', 'adidas.com', 'zara.com', 'etsy.com', 'shopify.com'
+/**
+ * Verified official primary & regional domains per brand.
+ * Only exact registrable-domain matches against this map are recognized as official
+ * (never substring matches), and official recognition never bypasses TLS/RDAP/redirect/threat checks.
+ */
+export const OFFICIAL_BRAND_DOMAINS: Record<string, readonly string[]> = {
+  amazon: [
+    'amazon.com',
+    'amazon.in',
+    'amazon.co.uk',
+    'amazon.de',
+    'amazon.co.jp',
+    'amazon.ca',
+    'amazon.fr',
+    'amazon.it',
+    'amazon.es',
+    'amazon.nl',
+    'amazon.se',
+    'amazon.pl',
+    'amazon.sg',
+    'amazon.ae',
+    'amazon.sa',
+    'amazon.eg',
+    'amazon.com.au',
+    'amazon.com.br',
+    'amazon.com.mx',
+    'amazon.com.tr',
+    'amazon.com.be',
+  ],
+  apple: [
+    'apple.com',
+    'apple.co.uk',
+    'apple.in',
+    'apple.de',
+    'apple.ca',
+    'apple.fr',
+    'apple.co.jp',
+    'apple.com.au',
+  ],
+  paypal: [
+    'paypal.com',
+    'paypal.co.uk',
+    'paypal.in',
+    'paypal.de',
+    'paypal.ca',
+    'paypal.fr',
+    'paypal.it',
+    'paypal.es',
+    'paypal.nl',
+    'paypal.com.au',
+    'paypal.com.br',
+    'paypal.com.mx',
+    'paypal.co.jp',
+    'paypal.me',
+  ],
+  nike: [
+    'nike.com',
+    'nike.co.uk',
+    'nike.in',
+    'nike.de',
+    'nike.ca',
+    'nike.fr',
+    'nike.jp',
+  ],
+  rolex: ['rolex.com'],
+  sephora: [
+    'sephora.com',
+    'sephora.in',
+    'sephora.fr',
+    'sephora.co.uk',
+    'sephora.ca',
+    'sephora.de',
+    'sephora.it',
+    'sephora.es',
+    'sephora.com.au',
+    'sephora.sg',
+    'sephora.com.br',
+    'sephora.com.mx',
+  ],
+  target: ['target.com', 'target.com.au'],
+  walmart: ['walmart.com', 'walmart.ca', 'walmart.com.mx', 'walmart.cl'],
+  bestbuy: ['bestbuy.com', 'bestbuy.ca'],
+  ebay: [
+    'ebay.com',
+    'ebay.in',
+    'ebay.co.uk',
+    'ebay.de',
+    'ebay.ca',
+    'ebay.fr',
+    'ebay.it',
+    'ebay.es',
+    'ebay.com.au',
+    'ebay.nl',
+    'ebay.at',
+    'ebay.ch',
+    'ebay.ie',
+    'ebay.pl',
+    'ebay.com.sg',
+    'ebay.com.my',
+    'ebay.com.hk',
+  ],
+  gucci: ['gucci.com'],
+  louisvuitton: ['louisvuitton.com'],
+  chanel: ['chanel.com'],
+  nordstrom: ['nordstrom.com', 'nordstromrack.com'],
+  costco: [
+    'costco.com',
+    'costco.ca',
+    'costco.co.uk',
+    'costco.com.mx',
+    'costco.co.jp',
+    'costco.com.au',
+    'costco.co.kr',
+    'costco.com.tw',
+  ],
+  aliexpress: ['aliexpress.com', 'aliexpress.us', 'aliexpress.ru'],
+  zara: ['zara.com'],
+  adidas: [
+    'adidas.com',
+    'adidas.co.in',
+    'adidas.co.uk',
+    'adidas.de',
+    'adidas.ca',
+    'adidas.fr',
+    'adidas.it',
+    'adidas.es',
+    'adidas.nl',
+    'adidas.com.au',
+    'adidas.jp',
+    'adidas.co.kr',
+    'adidas.com.br',
+    'adidas.com.sg',
+  ],
+  samsung: ['samsung.com', 'samsung.in', 'samsung.co.uk', 'samsung.de', 'samsung.ca'],
+  etsy: ['etsy.com'],
+  shopify: [
+    'shopify.com',
+    'shopify.in',
+    'shopify.ca',
+    'shopify.co.uk',
+    'shopify.de',
+    'shopify.com.au',
+  ],
+};
+
+export const TRUSTED_DOMAINS = new Set<string>(
+  Object.values(OFFICIAL_BRAND_DOMAINS).flat()
+);
+
+const BRAND_COMPOUND_AFFIXES = [
+  'login', 'signin', 'verify', 'secure', 'security', 'account', 'update',
+  'support', 'service', 'help', 'billing', 'pay', 'shop', 'store', 'deal',
+  'deals', 'outlet', 'official', 'promo', 'sale', 'auth', 'portal', 'club',
+  'vip', 'discount', 'cheap', 'buy', 'order', 'track', 'claim', 'reward',
+  'gift', 'card', 'wallet', 'id', 'mail', 'my', 'get', 'real', 'true',
+  'usa', 'uk', 'india',
+];
+
+const SECURITY_IMPERSONATION_AFFIXES = new Set([
+  'login', 'signin', 'verify', 'secure', 'security', 'account', 'update',
+  'support', 'billing', 'auth', 'portal', 'wallet', 'claim', 'reward', 'official',
 ]);
+
+interface BrandBoundaryMatch {
+  matched: boolean;
+  exactLabelMatch: boolean;
+  hasSecurityAffix: boolean;
+}
+
+/**
+ * Matches a brand or lookalike term strictly on domain label, hyphen/digit token,
+ * or known phishing/commercial compound affix boundaries (avoiding false positives
+ * on unrelated dictionary words such as "thebay.com" or "pineapple.com").
+ */
+function matchesBrandWithBoundary(
+  hostname: string,
+  registrableDomain: string,
+  term: string
+): BrandBoundaryMatch {
+  const hostLabels = hostname.split('.').filter(Boolean);
+  const registrableParts = registrableDomain.split('.').filter(Boolean);
+  const registrableSld = registrableParts[0] || '';
+  const subdomainLabels = hostLabels.slice(0, Math.max(0, hostLabels.length - registrableParts.length));
+  const nonTldLabels = [...subdomainLabels, registrableSld].filter(Boolean);
+
+  if (registrableSld === term || subdomainLabels.includes(term)) {
+    const otherTokens = nonTldLabels.flatMap((lbl) => lbl.split(/[-_\d]+/).filter(Boolean));
+    const hasSecurityAffix = otherTokens.some((tok) => SECURITY_IMPERSONATION_AFFIXES.has(tok));
+    return { matched: true, exactLabelMatch: true, hasSecurityAffix };
+  }
+
+  for (const label of nonTldLabels) {
+    const tokens = label.split(/[-_\d]+/).filter(Boolean);
+    if (tokens.includes(term)) {
+      const hasSecurityAffix = tokens.some((tok) => SECURITY_IMPERSONATION_AFFIXES.has(tok));
+      return { matched: true, exactLabelMatch: false, hasSecurityAffix };
+    }
+
+    const idx = label.indexOf(term);
+    if (idx !== -1) {
+      const before = label.slice(0, idx);
+      const after = label.slice(idx + term.length);
+      const beforeOk =
+        before === '' ||
+        BRAND_COMPOUND_AFFIXES.some((affix) => before === affix || before.endsWith(`-${affix}`));
+      const afterOk =
+        after === '' ||
+        BRAND_COMPOUND_AFFIXES.some((affix) => after === affix || after.startsWith(`${affix}-`));
+
+      if (beforeOk && afterOk && (before !== '' || after !== '')) {
+        const hasSecurityAffix = Array.from(SECURITY_IMPERSONATION_AFFIXES).some(
+          (affix) => before.includes(affix) || after.includes(affix)
+        );
+        return { matched: true, exactLabelMatch: false, hasSecurityAffix };
+      }
+    }
+  }
+
+  return { matched: false, exactLabelMatch: false, hasSecurityAffix: false };
+}
+
+function buildLeetVariations(brand: string): string[] {
+  const variations = new Set<string>([
+    brand.replace(/o/g, '0'),
+    brand.replace(/l/g, '1'),
+    brand.replace(/e/g, '3'),
+    brand.replace(/i/g, '1'),
+    brand.replace(/a/g, '4'),
+  ]);
+
+  const subs: Record<string, string> = { o: '0', l: '1', e: '3', i: '1', a: '4' };
+  for (let i = 0; i < brand.length; i++) {
+    const replacement = subs[brand[i]];
+    if (replacement) {
+      variations.add(`${brand.slice(0, i)}${replacement}${brand.slice(i + 1)}`);
+    }
+  }
+
+  variations.delete(brand);
+  return Array.from(variations).filter((v) => v.length >= 4);
+}
 
 export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
   const indicators: RiskIndicator[] = [];
@@ -42,7 +283,7 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
     'Actual TLS certificate issuance chain (requires active server probe)',
   ];
 
-  let evidenceWeight = 30; // Base evidence for syntactic URL analysis
+  const evidenceWeight = 20; // Base evidence for syntactic URL analysis
 
   // 1. Basic sanitization and explicit protocol tracking
   let trimmed = rawUrl.trim();
@@ -156,8 +397,8 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
   }
 
   // 4. IP Address Hostname
-  const isIpv4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
-  const isIpv6 = hostname.startsWith('[') && hostname.endsWith(']');
+  const isIpv4 = isValidIpv4(hostname);
+  const isIpv6 = isValidIpv6(hostname);
   if (isIpv4 || isIpv6) {
     indicators.push({
       id: 'ip-address-host',
@@ -211,7 +452,7 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
       scoreImpact: 15,
       isObserved: true,
       description: `Domain has ${parts.length - 2} levels of subdomains (${hostname}), frequently used to bury suspicious domains behind familiar keywords.`,
-      remedyOrPrecaution: 'Check the root domain (the last two segments before the path) to identify who actually owns the site.',
+      remedyOrPrecaution: 'Check the registrable root domain before the path to identify who actually owns the site.',
     });
   }
 
@@ -244,28 +485,26 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
     });
   }
 
-  // 10. Brand Typosquatting / Impersonation Check
-  const rootDomain = parts.slice(-2).join('.');
-  const secondLevelDomain = parts.length >= 2 ? parts[parts.length - 2] : '';
+  // 10. Official Domain & Brand Typosquatting / Impersonation Check
+  const registrableDomain = getRegistrableDomain(hostname);
 
-  if (TRUSTED_DOMAINS.has(rootDomain)) {
+  if (TRUSTED_DOMAINS.has(registrableDomain)) {
     positiveSignals.push({
       id: 'recognized-official-domain',
       name: 'Recognized Official Brand Domain',
-      description: `The root domain "${rootDomain}" matches a recognized global consumer platform.`,
+      description: `The registrable domain "${registrableDomain}" matches a verified official global or regional domain. (Note: Domain recognition never bypasses TLS, redirect, or threat-feed checks).`,
       isVerified: true,
       scoreDeduction: 20,
     });
-    evidenceWeight += 30;
   } else {
-    // Check if a famous brand name is embedded in a lookalike fashion
+    // Check if a famous brand name is embedded at a domain/token/compound boundary
     for (const brand of COMMON_TARGETED_BRANDS) {
-      const containsBrand = hostname.includes(brand);
-      if (containsBrand && !TRUSTED_DOMAINS.has(rootDomain)) {
-        // Flag brand in subdomain or root SLD that isn't the official domain
-        const isExactSld = secondLevelDomain === brand;
-        const severity = isExactSld ? 'high' : 'medium';
-        const impact = isExactSld ? 40 : 25;
+      const brandMatch = matchesBrandWithBoundary(hostname, registrableDomain, brand);
+      if (brandMatch.matched) {
+        const isHighSeverity = brandMatch.exactLabelMatch || brandMatch.hasSecurityAffix;
+        const severity = isHighSeverity ? 'high' : 'medium';
+        const impact = brandMatch.exactLabelMatch ? 40 : brandMatch.hasSecurityAffix ? 35 : 28;
+        const officialExamples = (OFFICIAL_BRAND_DOMAINS[brand] || []).slice(0, 3).join(', ');
 
         indicators.push({
           id: `brand-impersonation-${brand}`,
@@ -274,23 +513,18 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
           severity,
           scoreImpact: impact,
           isObserved: true,
-          description: `The URL contains the brand name "${brand}", but the apex domain is "${rootDomain}" rather than the brand's verified primary domain.`,
-          remedyOrPrecaution: `Search for ${brand}'s official website directly and navigate through their verified primary site.`,
+          description: `The hostname contains the brand name "${brand}", but the registrable domain is "${registrableDomain}" rather than an official verified domain${officialExamples ? ` (such as ${officialExamples})` : ''}.`,
+          remedyOrPrecaution: `Search for ${brand}'s official website directly and navigate through their verified domain.`,
         });
         break;
       }
 
-      // Check common leetspeak substitutions (e.g. amaz0n, paypa1, ro1ex)
-      const leetVariations = [
-        brand.replace(/o/g, '0'),
-        brand.replace(/l/g, '1'),
-        brand.replace(/e/g, '3'),
-        brand.replace(/i/g, '1'),
-        brand.replace(/a/g, '4'),
-      ].filter(v => v !== brand);
-
-      const foundLeet = leetVariations.find(v => hostname.includes(v));
-      if (foundLeet && !hostname.includes(brand)) {
+      // Check common leetspeak substitutions (e.g. amaz0n, paypa1, ro1ex) with boundary awareness
+      const leetVariations = buildLeetVariations(brand);
+      const foundLeet = leetVariations.find(
+        (variant) => matchesBrandWithBoundary(hostname, registrableDomain, variant).matched
+      );
+      if (foundLeet) {
         indicators.push({
           id: `typosquatting-leet-${brand}`,
           name: `Potential Typosquatting of Brand "${brand}"`,
@@ -298,8 +532,8 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
           severity: 'high',
           scoreImpact: 45,
           isObserved: true,
-          description: `Detected character substitution "${foundLeet}" mimicking the brand "${brand}". This is a common phishing and counterfeit storefront tactic.`,
-          remedyOrPrecaution: 'Do not enter payment information. Inspect the spelling closely.',
+          description: `Detected character substitution "${foundLeet}" mimicking the brand "${brand}" on domain "${registrableDomain}". This is a common phishing and counterfeit storefront tactic.`,
+          remedyOrPrecaution: 'Do not enter payment information. Inspect the domain spelling closely.',
         });
         break;
       }
@@ -327,7 +561,7 @@ export function analyzeUrlStructure(rawUrl: string): AnalyzedUrlResult {
   return {
     indicators,
     positiveSignals,
-    evidenceWeight: Math.min(evidenceWeight + (indicators.length > 0 ? 20 : 10), 100),
+    evidenceWeight,
     unverifiedAspects,
   };
 }

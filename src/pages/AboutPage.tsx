@@ -119,7 +119,7 @@ export const AboutPage: React.FC<AboutPageProps> = ({ onNavigate }) => {
           </div>
           <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg">
             <span className="text-slate-400 block text-[10px] uppercase font-mono">AI Explanation</span>
-            <span className="text-white font-semibold">Gemini 3.8 Flash (@google/genai)</span>
+            <span className="text-white font-semibold">Gemini 4 Hydrogen (@google/genai)</span>
           </div>
           <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg">
             <span className="text-slate-400 block text-[10px] uppercase font-mono">Database</span>

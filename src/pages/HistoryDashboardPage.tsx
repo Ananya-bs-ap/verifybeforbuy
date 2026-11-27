@@ -20,48 +20,78 @@ import {
   ArrowRight,
   Code2,
   X,
+  UserCheck,
+  UserX,
+  LogIn,
+  UserPlus,
 } from 'lucide-react';
-import { SavedScanRecord, RiskCategory, AssessmentResult } from '../types';
+import { AuthUserProfile, SavedScanRecord, AssessmentResult, SupabaseConfigStatus } from '../types';
 import { HistoryService } from '../lib/supabase/historyService';
-import { supabaseConfigStatus } from '../lib/supabase/client';
+import { checkSupabaseConnection, supabaseConfigStatus } from '../lib/supabase/client';
+import schemaSql from '../lib/supabase/schema.sql?raw';
 import { CATEGORY_META } from '../lib/riskEngine/rules';
 import { VerificationReport } from '../components/VerificationReport';
 import { NavTab } from '../components/Navbar';
 
 interface HistoryDashboardPageProps {
   onNavigate: (tab: NavTab) => void;
+  authUser?: AuthUserProfile | null;
 }
 
-export const HistoryDashboardPage: React.FC<HistoryDashboardPageProps> = ({ onNavigate }) => {
+export const HistoryDashboardPage: React.FC<HistoryDashboardPageProps> = ({
+  onNavigate,
+  authUser = null,
+}) => {
   const [records, setRecords] = useState<SavedScanRecord[]>([]);
+  const [dbStatus, setDbStatus] = useState<SupabaseConfigStatus>({ ...supabaseConfigStatus });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activeReport, setActiveReport] = useState<AssessmentResult | null>(null);
   const [showSqlModal, setShowSqlModal] = useState(false);
   const [copiedSql, setCopiedSql] = useState(false);
 
-  useEffect(() => {
-    loadHistory();
-  }, []);
+  const activeUserId = authUser?.id ?? null;
 
-  const loadHistory = async () => {
-    const list = await HistoryService.getHistory();
+  useEffect(() => {
+    setActiveReport(null);
+    setRecords([]);
+    void refreshConnectionAndHistory(false, activeUserId);
+  }, [activeUserId]);
+
+  const refreshConnectionAndHistory = async (
+    forceCheck = false,
+    scopedUserId: string | null = activeUserId
+  ) => {
+    const status = await checkSupabaseConnection(forceCheck);
+    setDbStatus(status);
+    const list = await HistoryService.getHistory({ userId: scopedUserId });
+    setRecords(list);
+  };
+
+  const loadHistory = async (scopedUserId: string | null = activeUserId) => {
+    const list = await HistoryService.getHistory({ userId: scopedUserId });
     setRecords(list);
   };
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    await HistoryService.deleteRecord(id);
-    await loadHistory();
+    await HistoryService.deleteRecord(id, { userId: activeUserId });
+    await loadHistory(activeUserId);
     if (activeReport?.id === id) {
       setActiveReport(null);
     }
   };
 
   const handleClearAll = async () => {
-    if (window.confirm('Clear all local scan history?')) {
-      await HistoryService.clearHistory();
-      await loadHistory();
+    const scopeLabel =
+      activeUserId && dbStatus.connectionState === 'connected'
+        ? `Clear all scan history for ${authUser?.email || 'your account'} from Supabase and local fallback?`
+        : activeUserId
+          ? `Clear all local fallback scan history for ${authUser?.email || 'your account'}?`
+          : 'Clear all guest scan history from local browser storage?';
+    if (window.confirm(scopeLabel)) {
+      await HistoryService.clearHistory({ userId: activeUserId });
+      await loadHistory(activeUserId);
       setActiveReport(null);
     }
   };
@@ -107,60 +137,48 @@ export const HistoryDashboardPage: React.FC<HistoryDashboardPageProps> = ({ onNa
     return matchesSearch && matchesCat;
   });
 
-  const sqlSchemaText = `-- Supabase PostgreSQL Schema for VerifyBeforeBuy AI
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-
-CREATE TABLE IF NOT EXISTS public.profiles (
-  id UUID REFERENCES auth.users ON DELETE CASCADE PRIMARY KEY,
-  email TEXT,
-  display_name TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-
-CREATE TABLE IF NOT EXISTS public.scan_reports (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-  scan_type TEXT NOT NULL CHECK (scan_type IN ('website', 'product', 'code')),
-  target_summary TEXT NOT NULL,
-  risk_score INTEGER NOT NULL CHECK (risk_score >= 0 AND risk_score <= 100),
-  risk_category TEXT NOT NULL CHECK (risk_category IN ('lower', 'moderate', 'elevated', 'high')),
-  confidence_coverage TEXT NOT NULL,
-  raw_result JSONB NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-ALTER TABLE public.scan_reports ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Users view own reports" ON public.scan_reports
-  FOR SELECT USING (auth.uid() = user_id OR user_id IS NULL);
-
-CREATE POLICY "Users insert reports" ON public.scan_reports
-  FOR INSERT WITH CHECK (auth.uid() = user_id OR user_id IS NULL);
-`;
+  const sqlSchemaText = schemaSql;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
       {/* Header & Status Indicator */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-3xl font-extrabold text-white tracking-tight">
               Scan History &amp; Audits
             </h1>
-            <span
-              className={`text-[11px] font-mono px-2.5 py-0.5 rounded border uppercase font-medium ${
-                supabaseConfigStatus.isConfigured
-                  ? 'text-teal-400 border-teal-800 bg-teal-950/60'
-                  : 'text-slate-400 border-slate-700 bg-slate-900/60'
+            <button
+              type="button"
+              onClick={() => refreshConnectionAndHistory(true)}
+              title="Click to re-verify live Supabase database connection"
+              className={`text-[11px] font-mono px-2.5 py-0.5 rounded border uppercase font-medium transition-colors ${
+                dbStatus.connectionState === 'connected'
+                  ? 'text-teal-400 border-teal-800 bg-teal-950/60 hover:bg-teal-950'
+                  : dbStatus.connectionState === 'error'
+                    ? 'text-amber-300 border-amber-700 bg-amber-950/60 hover:bg-amber-950'
+                    : dbStatus.connectionState === 'checking'
+                      ? 'text-indigo-300 border-indigo-700 bg-indigo-950/60'
+                      : 'text-slate-400 border-slate-700 bg-slate-900/60 hover:bg-slate-800'
               }`}
             >
-              {supabaseConfigStatus.isConfigured ? `Supabase Connected (${supabaseConfigStatus.projectId || 'muwesnqibkfbjzxqdhfj'})` : 'Local Browser Mode'}
-            </span>
+              {dbStatus.connectionState === 'connected'
+                ? `Supabase Connected (${dbStatus.projectId})`
+                : dbStatus.connectionState === 'checking'
+                  ? 'Checking Supabase Connection...'
+                  : dbStatus.connectionState === 'error'
+                    ? 'Supabase Unavailable · Local Fallback'
+                    : 'Local Browser Mode (Unconfigured)'}
+            </button>
           </div>
           <p className="text-xs text-slate-400">
-            Audit logs are saved locally in your browser. Configure Supabase PostgreSQL anytime for persistent multi-device cloud storage.
+            {!activeUserId
+              ? 'Guest Mode active: scans stay strictly in your browser localStorage and are never uploaded to Supabase.'
+              : dbStatus.connectionState === 'connected'
+                ? `Signed in as ${authUser?.displayName} (${authUser?.email}) — syncing private scans to Supabase PostgreSQL.`
+                : dbStatus.connectionState === 'error'
+                  ? `Database check failed: ${dbStatus.errorMessage || 'Unable to reach Supabase'}. Scans for ${authUser?.email} are isolated in local fallback storage.`
+                  : `Signed in as ${authUser?.displayName}. Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY for cloud sync.`}
           </p>
         </div>
 
@@ -203,6 +221,61 @@ CREATE POLICY "Users insert reports" ON public.scan_reports
           )}
         </div>
       </div>
+
+      {/* Account Scope & Isolation Banner */}
+      {authUser ? (
+        <div className="p-4 bg-slate-900/80 border border-teal-800/60 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-teal-500/15 border border-teal-500/30 text-teal-300 flex items-center justify-center shrink-0">
+              <UserCheck className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-white">
+                {authUser.displayName}{' '}
+                <span className="font-mono font-normal text-slate-400">({authUser.email})</span>
+              </div>
+              <div className="text-[11px] text-slate-400">
+                Account-isolated history active · Other users and guest scans are strictly separated.
+              </div>
+            </div>
+          </div>
+          <span className="text-[10px] font-mono uppercase px-2 py-1 rounded bg-teal-950/70 text-teal-300 border border-teal-800 self-start sm:self-center">
+            Authenticated Sync
+          </span>
+        </div>
+      ) : (
+        <div className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 flex items-center justify-center shrink-0">
+              <UserX className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-white">Guest Mode (Local Storage Only)</div>
+              <div className="text-[11px] text-slate-400">
+                Guest scan history is stored only in this browser and is never uploaded to Supabase. Sign in to save private cloud history.
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onNavigate('login')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>Sign In</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('register')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Register</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Filter & Search Bar */}
       <div className="flex flex-col sm:flex-row gap-4 justify-between items-center bg-slate-900/60 p-4 border border-slate-800 rounded-xl">
@@ -303,10 +376,19 @@ CREATE POLICY "Users insert reports" ON public.scan_reports
                   }`}
                 >
                   <div className="space-y-1 truncate pr-2">
-                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
                       <span className="uppercase font-semibold text-teal-400 font-mono text-[10px]">
                         {record.type}
                       </span>
+                      {(record.isDemo || record.result?.isDemoMode) ? (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-amber-950/70 text-amber-300 border border-amber-700/70">
+                          Synthetic Demo
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-950/60 text-emerald-300 border border-emerald-800/60">
+                          Actual Scan
+                        </span>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span className="font-mono text-[11px] tabular-nums">
                         {new Date(record.createdAt).toLocaleDateString()} at{' '}
@@ -328,7 +410,7 @@ CREATE POLICY "Users insert reports" ON public.scan_reports
                           {meta.label}
                         </div>
                         <div className="text-[10px] text-slate-400">
-                          {record.storageSource === 'supabase' ? 'Cloud' : 'Local'}
+                          {record.storageSource === 'supabase' ? 'Supabase Cloud' : 'Local Browser'}
                         </div>
                       </div>
                       <div className={`px-2.5 py-1 rounded border font-mono font-bold text-sm tabular-nums ${meta.badgeClass}`}>
@@ -373,12 +455,11 @@ CREATE POLICY "Users insert reports" ON public.scan_reports
             </p>
 
             <div className="space-y-2 text-xs text-slate-300">
-              <p>1. Open your <strong>Supabase Dashboard &gt; SQL Editor</strong>.</p>
-              <p>2. Paste and run the migration script below to create the schema and Row Level Security policies:</p>
+              <p>1. Open your <strong>Supabase Dashboard &gt; SQL Editor</strong> and run the complete migration script below:</p>
             </div>
 
             <div className="relative">
-              <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-[11px] font-mono text-teal-300 overflow-x-auto max-h-48">
+              <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-[11px] font-mono text-teal-300 overflow-x-auto max-h-56">
                 {sqlSchemaText}
               </pre>
               <button
@@ -393,9 +474,14 @@ CREATE POLICY "Users insert reports" ON public.scan_reports
               </button>
             </div>
 
-            <p className="text-xs text-slate-400">
-              3. Set <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> in your environment or <code>.env</code>.
-            </p>
+            <div className="text-xs text-slate-400 space-y-1.5">
+              <p>
+                2. Set <code className="text-teal-300">VITE_SUPABASE_URL</code> and your public publishable/anon key <code className="text-teal-300">VITE_SUPABASE_ANON_KEY</code> in <code className="text-slate-300">.env</code> (for local VS Code) or Google AI Studio environment settings.
+              </p>
+              <p className="text-[11px] text-amber-300/90">
+                Never place a <code className="font-mono">service_role</code> or <code className="font-mono">sb_secret_</code> key in frontend <code className="font-mono">VITE_</code> variables.
+              </p>
+            </div>
 
             <div className="pt-2 flex justify-end">
               <button

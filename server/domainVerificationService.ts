@@ -26,7 +26,7 @@ import {
   ThreatIntelVerificationInfo,
   TlsVerificationInfo,
 } from '../src/types/index.ts';
-import { validateWebsiteUrl } from '../src/lib/urlValidator.ts';
+import { getRegistrableDomain, validateWebsiteUrl } from '../src/lib/urlValidator.ts';
 import { analyzeUrlStructure } from '../src/lib/riskEngine/urlAnalyzer.ts';
 import {
   createPinnedLookup,
@@ -77,36 +77,7 @@ const SEEDED_RDAP_SERVERS: Record<string, string> = {
   jp: 'https://rdap.jprs.jp/',
 };
 
-// Known multi-level public suffixes so apex extraction doesn't query ".co.uk" -> "co.uk" as apex
-const MULTI_LABEL_PUBLIC_SUFFIXES = new Set([
-  'co.uk',
-  'org.uk',
-  'ac.uk',
-  'gov.uk',
-  'com.au',
-  'net.au',
-  'org.au',
-  'co.in',
-  'net.in',
-  'org.in',
-  'firm.in',
-  'co.jp',
-  'ne.jp',
-  'or.jp',
-  'com.br',
-  'org.br',
-  'net.br',
-  'co.nz',
-  'co.za',
-  'com.sg',
-  'com.my',
-  'com.mx',
-  'com.tr',
-  'co.kr',
-  'com.tw',
-  'com.hk',
-  'co.id',
-]);
+export { getRegistrableDomain };
 
 // Shared multi-tenant hosting suffixes where one bad user URL must not taint the entire parent domain
 const SHARED_HOSTING_SUFFIXES = new Set([
@@ -204,25 +175,6 @@ export function getDefaultDomainVerifyTimeoutMs(): number {
     }
   }
   return 5000;
-}
-
-/**
- * Derive registrable apex domain cleanly, preserving common 2-level public suffixes like .co.uk.
- */
-export function getRegistrableDomain(rawHostname: string): string {
-  const host = rawHostname.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (!host || net.isIP(host) !== 0) {
-    return host;
-  }
-  const parts = host.split('.').filter(Boolean);
-  if (parts.length <= 2) {
-    return parts.join('.');
-  }
-  const lastTwo = parts.slice(-2).join('.');
-  if (MULTI_LABEL_PUBLIC_SUFFIXES.has(lastTwo) && parts.length >= 3) {
-    return parts.slice(-3).join('.');
-  }
-  return lastTwo;
 }
 
 function getTld(apexDomain: string): string {
@@ -864,6 +816,7 @@ async function checkThreatIntel(
 
   // 1. OpenPhish public feed (unauthenticated HTTP 200)
   try {
+    let openPhishFetchFailed = false;
     if (bypassCache || !openPhishCache || openPhishCache.expiresAt <= Date.now()) {
       const feedRes = await fetchFn(OPENPHISH_FEED_URL, {
         headers: { Accept: 'text/plain' },
@@ -871,6 +824,7 @@ async function checkThreatIntel(
       });
 
       if (feedRes.status === 429) {
+        openPhishFetchFailed = true;
         providers.push({
           provider: 'OpenPhish Community Feed',
           checked: false,
@@ -878,6 +832,7 @@ async function checkThreatIntel(
           detail: 'Rate limited (HTTP 429)',
         });
       } else if (!feedRes.ok) {
+        openPhishFetchFailed = true;
         providers.push({
           provider: 'OpenPhish Community Feed',
           checked: false,
@@ -910,7 +865,7 @@ async function checkThreatIntel(
       }
     }
 
-    if (openPhishCache) {
+    if (!openPhishFetchFailed && openPhishCache) {
       const normalizedTarget = normalizeUrlForThreatMatch(normalizedUrl);
       const cleanHost = hostname.toLowerCase().replace(/^www\./, '');
       const apex = getRegistrableDomain(cleanHost);

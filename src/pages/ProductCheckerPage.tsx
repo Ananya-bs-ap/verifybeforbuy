@@ -297,7 +297,7 @@ export const ProductCheckerPage: React.FC = () => {
               <span>Trained ML Product Risk Classifier: Active</span>
               {modelInfo ? (
                 <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-mono px-2 py-0.5 rounded border border-emerald-500/30">
-                  {(modelInfo.metrics.accuracy * 100).toFixed(2)}% Holdout Accuracy
+                  {(modelInfo.metrics.accuracy * 100).toFixed(2)}% {modelInfo.isSyntheticDataset ? 'Synthetic Holdout Accuracy' : 'Holdout Accuracy'}
                 </span>
               ) : (
                 <span className="bg-slate-800 text-slate-300 text-[10px] font-mono px-2 py-0.5 rounded border border-slate-700">
@@ -306,7 +306,7 @@ export const ProductCheckerPage: React.FC = () => {
               )}
               {modelInfo?.isSyntheticDataset && (
                 <span className="bg-amber-500/20 text-amber-300 text-[10px] font-mono px-2 py-0.5 rounded border border-amber-500/30">
-                  Synthetic Training Corpus
+                  Synthetic-Data-Trained Listing Classifier
                 </span>
               )}
             </div>
@@ -321,7 +321,9 @@ export const ProductCheckerPage: React.FC = () => {
 
           {modelInfo && (
             <p className="text-slate-400 leading-relaxed text-[11px]">
-              {modelInfo.modelType} across {modelInfo.featureCount} listing features (Dataset: <code className="text-slate-300">{modelInfo.dataset}</code>; precision {(modelInfo.metrics.precision * 100).toFixed(1)}%, recall {(modelInfo.metrics.recall * 100).toFixed(1)}%). Listing URLs are also screened separately using the Website Phishing ML model.
+              {modelInfo.modelType} across {modelInfo.featureCount} listing features (Dataset: <code className="text-slate-300">{modelInfo.dataset}</code>; precision {(modelInfo.metrics.precision * 100).toFixed(1)}%, recall {(modelInfo.metrics.recall * 100).toFixed(1)}%
+              {modelInfo.metrics.rocAuc !== undefined ? `, ROC-AUC ${(modelInfo.metrics.rocAuc * 100).toFixed(1)}%` : ''}
+              {modelInfo.metrics.prAuc !== undefined ? `, PR-AUC ${(modelInfo.metrics.prAuc * 100).toFixed(1)}%` : ''}). Listing URLs are also screened separately using the Website Phishing ML model.
             </p>
           )}
 
@@ -709,6 +711,9 @@ export const ProductCheckerPage: React.FC = () => {
         <div className="pt-4">
           <VerificationReport
             result={currentResult}
+            onSave={(updated) => {
+              void HistoryService.saveRecord(updated);
+            }}
             onReset={() => setCurrentResult(null)}
           />
         </div>

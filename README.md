@@ -37,7 +37,7 @@ VerifyBeforeBuy AI is an AI-assisted online shopping risk assessment and consume
    - Evidence coverage metric (Minimal, Moderate, High, Comprehensive).
 
 5. **AI Plain-Language Risk Explanations**
-   - Server-side integration with **Gemini 3.8 Flash** via `@google/genai`.
+   - Server-side integration with **Gemini 4 Hydrogen** (`gemini-4-hydrogen`) via `@google/genai`.
    - Never exposes API keys to client JavaScript.
    - Structured system prompts ensure the AI explains findings without hallucinating fake database checks.
    - Standard deterministic fallback ensures rich explanations even when no external AI key is present.

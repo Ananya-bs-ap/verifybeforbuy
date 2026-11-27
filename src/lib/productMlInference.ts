@@ -1,161 +1,20 @@
 /**
  * VerifyBeforeBuy AI — ML Product Listing Risk Inference Engine
  *
- * Runs real-time inference using Logistic Regression parameters trained on
- * ml/data/product_listings_dataset.csv (10,000 labeled product listings).
+ * Runs real-time inference using Logistic Regression parameters trained with
+ * shared feature extraction (src/lib/productFeatureExtractor.ts) on
+ * ml/data/product_listings_dataset.csv (10,000 synthetic labelled listings).
  */
 
 import trainedProductModelData from '../ml_product_model.json';
 import { MlProductResult, ProductAnalysisInput, RiskCategory } from '../types/index.ts';
-import { verifyGs1CheckDigit } from './riskEngine/codeAnalyzer.ts';
-import { areCurrenciesCompatible, normalizeReturnPolicyStatus } from './productValidator.ts';
+import {
+  ExtractedProductFeatures,
+  extractProductFeatures,
+} from './productFeatureExtractor.ts';
 
-const REPLICA_KEYWORDS = [
-  '1:1 replica',
-  'mirror copy',
-  'original clone',
-  'oem version replica',
-  'bypass authenticity',
-  'unbranded luxury',
-  'aa grade clone',
-  'overrun factory stock',
-  'first copy',
-  'super clone',
-  'aaa grade',
-];
-
-const HIGH_PRESSURE_TACTICS = [
-  'wire transfer only',
-  'western union',
-  'crypto payment only',
-  'zelle only',
-  'gift card payment',
-  'do not dispute',
-  'friends and family only',
-  'act in next 5 minutes',
-];
-
-const CLEARANCE_CONTEXT_KEYWORDS = [
-  'refurbished',
-  'recertified',
-  'open-box',
-  'open box',
-  'clearance',
-  'liquidation',
-  'warranty',
-  'authorized',
-  'factory sealed',
-  'return policy',
-];
-
-const GENERIC_SELLER_PATTERNS = [
-  'store123',
-  'deals-shop',
-  'deals_king',
-  'seller',
-  'user99',
-  'discount_outlet',
-  'luxury-outlet',
-  'cheap_brand',
-  'anon_shop',
-  'flashsale',
-];
-
-const HIGH_ABUSE_TLDS = ['.xyz', '.click', '.top', '.work', '.buzz', '.cfd', '.tk', '.ml', '.gq'];
-
-export interface ExtractedProductFeatures {
-  hasReferencePrice: number;
-  discountRatio: number;
-  isExtremeDiscount: number;
-  hasSellerName: number;
-  isGenericSellerHandle: number;
-  hasSellerRating: number;
-  lowSellerRating: number;
-  highSellerRating: number;
-  noReturnPolicy: number;
-  hasReplicaKeyword: number;
-  hasPaymentPressureKeyword: number;
-  hasClearanceOrRefurbContext: number;
-  hasValidGs1Barcode: number;
-  hasRiskyListingUrl: number;
-}
-
-export function extractProductFeatures(input: ProductAnalysisInput): {
-  features: ExtractedProductFeatures;
-  vector: number[];
-} {
-  const sameCurrency = areCurrenciesCompatible(input.currency, input.referenceCurrency);
-  const hasReferencePrice =
-    input.referencePrice !== undefined && input.referencePrice > 0 && sameCurrency ? 1 : 0;
-
-  let discountRatio = 0;
-  if (hasReferencePrice && input.listedPrice !== undefined && input.referencePrice! > 0) {
-    discountRatio = Math.max(
-      0,
-      Math.min(1, (input.referencePrice! - input.listedPrice) / input.referencePrice!)
-    );
-  }
-  const isExtremeDiscount = discountRatio >= 0.75 ? 1 : 0;
-
-  const sellerTrim = (input.sellerName || '').trim();
-  const hasSellerName = sellerTrim.length > 0 ? 1 : 0;
-  const sellerLower = sellerTrim.toLowerCase();
-  const isGenericSellerHandle =
-    hasSellerName && GENERIC_SELLER_PATTERNS.some((p) => sellerLower.includes(p)) ? 1 : 0;
-
-  const hasSellerRating = input.sellerRating !== undefined && input.sellerRating > 0 ? 1 : 0;
-  const lowSellerRating = hasSellerRating && input.sellerRating! < 3.5 ? 1 : 0;
-  const highSellerRating = hasSellerRating && input.sellerRating! >= 4.5 ? 1 : 0;
-  const returnPolicyStatus = normalizeReturnPolicyStatus(input);
-  // Only explicit 'not_available' incurs noReturnPolicy; 'unknown' remains neutral (0)
-  const noReturnPolicy = returnPolicyStatus === 'not_available' ? 1 : 0;
-
-  const textBlob = `${input.productName || ''} ${input.productDescription || ''}`.toLowerCase();
-  const hasReplicaKeyword = REPLICA_KEYWORDS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
-  const hasPaymentPressureKeyword = HIGH_PRESSURE_TACTICS.some((kw) => textBlob.includes(kw)) ? 1 : 0;
-  const hasClearanceOrRefurbContext = CLEARANCE_CONTEXT_KEYWORDS.some((kw) => textBlob.includes(kw))
-    ? 1
-    : 0;
-
-  const cleanedCode = (input.productIdentifier || '').replace(/[\s-]/g, '');
-  const hasValidGs1Barcode = verifyGs1CheckDigit(cleanedCode) ? 1 : 0;
-
-  const urlLower = (input.listingUrl || '').trim().toLowerCase();
-  let hasRiskyListingUrl = 0;
-  if (urlLower.length > 0) {
-    const usesHttp = urlLower.startsWith('http://');
-    const usesAbuseTld = HIGH_ABUSE_TLDS.some((tld) => urlLower.includes(tld));
-    const hasIp = /\b\d{1,3}(\.\d{1,3}){3}\b/.test(urlLower);
-    const hasSuspiciousPath =
-      urlLower.includes('cheap') || urlLower.includes('outlet-deals') || urlLower.includes('verify');
-    if (usesHttp || usesAbuseTld || hasIp || hasSuspiciousPath) {
-      hasRiskyListingUrl = 1;
-    }
-  }
-
-  const features: ExtractedProductFeatures = {
-    hasReferencePrice,
-    discountRatio: Number(discountRatio.toFixed(4)),
-    isExtremeDiscount,
-    hasSellerName,
-    isGenericSellerHandle,
-    hasSellerRating,
-    lowSellerRating,
-    highSellerRating,
-    noReturnPolicy,
-    hasReplicaKeyword,
-    hasPaymentPressureKeyword,
-    hasClearanceOrRefurbContext,
-    hasValidGs1Barcode,
-    hasRiskyListingUrl,
-  };
-
-  const vector = (trainedProductModelData.features as (keyof ExtractedProductFeatures)[]).map(
-    (key) => features[key] ?? 0
-  );
-
-  return { features, vector };
-}
+export { extractProductFeatures };
+export type { ExtractedProductFeatures };
 
 function sigmoid(z: number): number {
   if (z > 20) return 1.0;
@@ -163,11 +22,24 @@ function sigmoid(z: number): number {
   return 1 / (1 + Math.exp(-z));
 }
 
+function isSyntheticCorpusLabel(datasetName?: string): boolean {
+  const datasetLabel = (datasetName || '').toLowerCase();
+  return (
+    datasetLabel.includes('curated') ||
+    datasetLabel.includes('synthetic') ||
+    datasetLabel.includes('product_listings_dataset.csv')
+  );
+}
+
 /**
  * Predicts product listing risk probability using the trained Logistic Regression model.
+ * Shares exact feature extraction logic with ml/train_product_model.ts.
  */
 export function predictProductRisk(input: ProductAnalysisInput): MlProductResult {
-  const { features, vector } = extractProductFeatures(input);
+  const { features, vector } = extractProductFeatures(
+    input,
+    trainedProductModelData.features
+  );
 
   const means = trainedProductModelData.means;
   const stds = trainedProductModelData.stds;
@@ -216,11 +88,7 @@ export function predictProductRisk(input: ProductAnalysisInput): MlProductResult
     );
   }
 
-  const datasetLabel = (trainedProductModelData.dataset || '').toLowerCase();
-  const isSyntheticDataset =
-    datasetLabel.includes('curated') ||
-    datasetLabel.includes('synthetic') ||
-    datasetLabel.includes('product_listings_dataset.csv');
+  const isSyntheticDataset = isSyntheticCorpusLabel(trainedProductModelData.dataset);
 
   return {
     productName: input.productName,
@@ -235,22 +103,19 @@ export function predictProductRisk(input: ProductAnalysisInput): MlProductResult
     trainingSamples: trainedProductModelData.samplesTrained,
     samplesTested: trainedProductModelData.samplesTested,
     isSyntheticDataset,
+    splitMetadata: (trainedProductModelData as any).splitMetadata,
     metrics: trainedProductModelData.metrics,
     featuresExtracted: features,
     indicatorsFlagged,
     disclaimer: isSyntheticDataset
-      ? 'This product listing classifier is currently trained on a synthetic corpus (product_listings_dataset.csv). Its accuracy reflects synthetic training rules—not verified real-world counterfeit detection performance or physical product authenticity.'
-      : 'Machine learning classification evaluates listing metadata, pricing variance, and seller signals. It is a caution indicator for suspicious listings and does not inspect physical goods.',
+      ? 'Synthetic-data-trained product listing risk classifier (product_listings_dataset.csv). Its evaluation metrics measure fit to synthetic listing patterns—not verified real-world counterfeit detection accuracy or physical product authenticity.'
+      : 'Machine learning product listing risk classifier evaluating metadata, pricing variance, and seller signals. It is a caution indicator for suspicious listings and does not verify physical product authenticity.',
     serviceAvailable: true,
   };
 }
 
 export function getProductModelMetadata() {
-  const datasetLabel = (trainedProductModelData.dataset || '').toLowerCase();
-  const isSyntheticDataset =
-    datasetLabel.includes('curated') ||
-    datasetLabel.includes('synthetic') ||
-    datasetLabel.includes('product_listings_dataset.csv');
+  const isSyntheticDataset = isSyntheticCorpusLabel(trainedProductModelData.dataset);
 
   return {
     modelType: trainedProductModelData.modelType,
@@ -260,6 +125,7 @@ export function getProductModelMetadata() {
     samplesTested: trainedProductModelData.samplesTested,
     trainedAt: trainedProductModelData.trainedAt,
     isSyntheticDataset,
+    splitMetadata: (trainedProductModelData as any).splitMetadata,
     metrics: trainedProductModelData.metrics,
     featureCount: trainedProductModelData.features.length,
     features: trainedProductModelData.features,

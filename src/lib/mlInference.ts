@@ -8,12 +8,27 @@
 
 import trainedModelData from '../ml_model.json';
 import { MlPhishingResult, RiskCategory } from '../types/index.ts';
+import { getRegistrableDomain } from './urlValidator';
+import { OFFICIAL_BRAND_DOMAINS, TRUSTED_DOMAINS } from './riskEngine/urlAnalyzer';
+
+const SECURITY_VERIFICATION_KEYWORDS = [
+  'login', 'verify', 'secure', 'account', 'update', 'banking', 'signin',
+  'wallet', 'password', 'confirm',
+];
+
+const PROMOTIONAL_LURE_KEYWORDS = [
+  'free', 'discount', 'wholesale', 'outlet', 'cheap', 'bonus', 'winner',
+  'claim', 'prize',
+];
+
+const BRAND_AND_SERVICE_KEYWORDS = [
+  'ebay', 'paypal', 'apple', 'amazon', 'netflix', 'microsoft', 'support', 'service',
+];
 
 const SUSPICIOUS_KEYWORDS = [
-  'login', 'verify', 'secure', 'account', 'update', 'banking', 'free',
-  'discount', 'wholesale', 'outlet', 'cheap', 'bonus', 'winner', 'signin',
-  'wallet', 'password', 'confirm', 'claim', 'prize', 'ebay', 'paypal',
-  'apple', 'amazon', 'netflix', 'microsoft', 'support', 'service'
+  ...SECURITY_VERIFICATION_KEYWORDS,
+  ...PROMOTIONAL_LURE_KEYWORDS,
+  ...BRAND_AND_SERVICE_KEYWORDS,
 ];
 
 const HIGH_RISK_TLDS = new Set([
@@ -48,33 +63,52 @@ export interface ExtractedUrlFeatures {
   isShortener: number;
 }
 
-export function extractUrlFeatures(rawUrl: string): { features: ExtractedUrlFeatures; vector: number[] } {
-  let cleanUrl = rawUrl.trim();
-  const lowerUrl = cleanUrl.toLowerCase();
-  const hasHttps = lowerUrl.startsWith('https://') ? 1 : 0;
+interface ParsedUrlComponents {
+  cleanHost: string;
+  pathStr: string;
+  searchStr: string;
+}
 
+function parseUrlComponents(rawUrl: string): ParsedUrlComponents {
+  let cleanUrl = rawUrl.trim();
   if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
     cleanUrl = 'http://' + cleanUrl;
   }
 
   let hostname = '';
   let pathStr = '';
+  let searchStr = '';
   try {
     const parsed = new URL(cleanUrl);
     hostname = parsed.hostname || '';
     pathStr = parsed.pathname || '';
+    searchStr = parsed.search || '';
   } catch {
     const noProto = cleanUrl.replace(/^https?:\/\//i, '');
     const firstSlash = noProto.indexOf('/');
     if (firstSlash !== -1) {
       hostname = noProto.substring(0, firstSlash);
-      pathStr = noProto.substring(firstSlash);
+      const rest = noProto.substring(firstSlash);
+      const qIdx = rest.indexOf('?');
+      pathStr = qIdx === -1 ? rest : rest.substring(0, qIdx);
+      searchStr = qIdx === -1 ? '' : rest.substring(qIdx);
     } else {
       hostname = noProto;
     }
   }
 
-  const cleanHost = hostname.split(':')[0].toLowerCase();
+  return {
+    cleanHost: hostname.split(':')[0].toLowerCase(),
+    pathStr,
+    searchStr,
+  };
+}
+
+export function extractUrlFeatures(rawUrl: string): { features: ExtractedUrlFeatures; vector: number[] } {
+  const lowerUrl = rawUrl.trim().toLowerCase();
+  const hasHttps = lowerUrl.startsWith('https://') ? 1 : 0;
+  const { cleanHost, pathStr } = parseUrlComponents(rawUrl);
+
   const urlLen = rawUrl.length;
   const hostLen = cleanHost.length;
   const pathLen = pathStr.length;
@@ -129,6 +163,75 @@ export function extractUrlFeatures(rawUrl: string): { features: ExtractedUrlFeat
   return { features, vector };
 }
 
+function buildKeywordExplanations(rawUrl: string): string[] {
+  const { cleanHost, pathStr, searchStr } = parseUrlComponents(rawUrl);
+  const pathAndQuery = `${pathStr}${searchStr}`.toLowerCase();
+  const registrableDomain = getRegistrableDomain(cleanHost);
+  const isOfficialDomain = TRUSTED_DOMAINS.has(registrableDomain);
+  const explanations: string[] = [];
+
+  const pathSecurityHits = SECURITY_VERIFICATION_KEYWORDS.filter((kw) => pathAndQuery.includes(kw));
+  if (pathSecurityHits.length > 0) {
+    explanations.push(
+      `Security/verification keyword embedded in URL path (${pathSecurityHits.slice(0, 3).join(', ')})`
+    );
+  }
+
+  const hostSecurityHits = SECURITY_VERIFICATION_KEYWORDS.filter((kw) => cleanHost.includes(kw));
+  if (hostSecurityHits.length > 0) {
+    explanations.push(
+      `Security/verification keyword present in hostname (${hostSecurityHits.slice(0, 3).join(', ')})`
+    );
+  }
+
+  const promoHits = PROMOTIONAL_LURE_KEYWORDS.filter(
+    (kw) => cleanHost.includes(kw) || pathAndQuery.includes(kw)
+  );
+  if (promoHits.length > 0) {
+    explanations.push(
+      `Promotional lure keyword in URL (${promoHits.slice(0, 3).join(', ')})`
+    );
+  }
+
+  const hostBrandHits = BRAND_AND_SERVICE_KEYWORDS.filter((kw) => {
+    if (!cleanHost.includes(kw)) return false;
+    if (isOfficialDomain) {
+      const officialList = OFFICIAL_BRAND_DOMAINS[kw];
+      if (officialList && officialList.includes(registrableDomain)) {
+        return false; // Official domain's own brand name is expected, not an anomaly
+      }
+    }
+    return true;
+  });
+
+  const pathBrandHits = BRAND_AND_SERVICE_KEYWORDS.filter((kw) => {
+    if (!pathAndQuery.includes(kw)) return false;
+    if (isOfficialDomain && (kw === 'support' || kw === 'service')) {
+      return false;
+    }
+    if (isOfficialDomain) {
+      const officialList = OFFICIAL_BRAND_DOMAINS[kw];
+      if (officialList && officialList.includes(registrableDomain)) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (hostBrandHits.length > 0) {
+    explanations.push(
+      `Brand or service keyword in non-official hostname (${hostBrandHits.slice(0, 3).join(', ')})`
+    );
+  }
+  if (pathBrandHits.length > 0) {
+    explanations.push(
+      `Brand or service keyword embedded in URL path (${pathBrandHits.slice(0, 3).join(', ')})`
+    );
+  }
+
+  return explanations;
+}
+
 function sigmoid(z: number): number {
   if (z > 20) return 1.0;
   if (z < -20) return 0.0;
@@ -169,7 +272,7 @@ export function predictPhishing(rawUrl: string): MlPhishingResult {
     riskCategory = 'moderate';
   }
 
-  // Identify specific flagged indicators from feature values
+  // Identify specific flagged indicators accurately from extracted URL components & feature values
   const indicatorsFlagged: string[] = [];
   if (features.hasIpAddress) {
     indicatorsFlagged.push('Raw IP address used instead of reputable domain name');
@@ -178,7 +281,7 @@ export function predictPhishing(rawUrl: string): MlPhishingResult {
     indicatorsFlagged.push('Uncommon high-risk Top-Level Domain (TLD) associated with disposable campaigns');
   }
   if (features.hasSuspiciousKeyword) {
-    indicatorsFlagged.push('Security/verification keyword embedded in URL path to mimic authentic portal');
+    indicatorsFlagged.push(...buildKeywordExplanations(rawUrl));
   }
   if (features.countSubdomains > 2) {
     indicatorsFlagged.push(`Abnormal subdomain nesting depth (${features.countSubdomains} levels)`);

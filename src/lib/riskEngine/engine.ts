@@ -14,6 +14,8 @@ import {
   CodeAnalysisInput,
   RiskIndicator,
   PositiveSignal,
+  ScoreBreakdown,
+  ScoreCategoryBreakdown,
   BarcodeLookupResult,
   DomainVerificationResult,
   SellerVerificationResult,
@@ -66,7 +68,7 @@ export class RiskScoringEngine {
         description: `Supervised classification model trained on 80,000 real-world malicious and legitimate URLs classified this URL structure as malicious with ${Math.round(mlPred.probability * 100)}% probability.`,
         remedyOrPrecaution: 'Do not enter passwords, credit cards, or personal credentials on this domain. Check the domain spelling carefully.',
       });
-      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 20);
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
     } else if (mlPred && !mlPred.isPhishing && mlPred.probability <= 0.30) {
       analysis.positiveSignals.push({
         id: 'ml_benign_classification',
@@ -75,6 +77,8 @@ export class RiskScoringEngine {
         isVerified: true,
         scoreDeduction: 15,
       });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+    } else if (mlPred) {
       analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
     }
 
@@ -104,7 +108,7 @@ export class RiskScoringEngine {
           description: domainVerification.dns.error || `DNS lookup found no active public IP records for "${domainVerification.hostname}".`,
           remedyOrPrecaution: 'Verify the exact spelling of the website address. Non-existent domains cannot host legitimate checkouts.',
         });
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
       }
 
       // 2. HTTP -> HTTPS Upgrades & Redirect Chain Inspection
@@ -143,7 +147,6 @@ export class RiskScoringEngine {
           description: domainVerification.redirects.suspiciousReasons.join('; ') || `URL redirected to a suspicious destination (${domainVerification.redirects.finalUrl}).`,
           remedyOrPrecaution: 'Avoid following unexpected multi-hop or cross-domain redirects away from the advertised storefront.',
         });
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 12);
       } else if (domainVerification.redirects.crossDomainRedirect) {
         analysis.indicators.push({
           id: 'redirect-cross-domain',
@@ -155,6 +158,18 @@ export class RiskScoringEngine {
           description: `Initial URL redirected across domains to "${domainVerification.redirects.finalUrl}". Confirm this belongs to the intended merchant.`,
           remedyOrPrecaution: 'Check that the final address bar domain matches the company you intend to buy from.',
         });
+      }
+
+      if (
+        domainVerification.redirects.finalStatusCode !== undefined ||
+        domainVerification.redirects.suspiciousDestination ||
+        domainVerification.redirects.downgradeHttpsToHttp
+      ) {
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
+      } else if (domainVerification.redirects.status === 'unavailable' && domainVerification.redirects.error) {
+        analysis.unverifiedAspects.push(
+          `Live HTTP redirect check unavailable (${domainVerification.redirects.error})`
+        );
       }
 
       // 3. Real SSL/TLS Certificate Validation (never solely classifies a site as safe)
@@ -213,7 +228,7 @@ export class RiskScoringEngine {
             scoreDeduction: 5,
           });
         }
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 12);
       } else if (domainVerification.tls.applicable) {
         analysis.unverifiedAspects = analysis.unverifiedAspects.map((u) =>
           u.toLowerCase().includes('tls certificate')
@@ -264,7 +279,7 @@ export class RiskScoringEngine {
             scoreDeduction: 0,
           });
         }
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 12);
       } else if (domainVerification.rdap.error) {
         analysis.unverifiedAspects = analysis.unverifiedAspects.map((u) =>
           u.toLowerCase().includes('domain age')
@@ -273,7 +288,23 @@ export class RiskScoringEngine {
         );
       }
 
-      // 5. Threat Intelligence Feed Verification
+      // 5. Threat Intelligence Feed Verification (proportional coverage, explicit unavailable reporting)
+      const threatProviders = domainVerification.threatIntel.providers || [];
+      const totalThreatProviders = threatProviders.length;
+      const checkedThreatProviders = threatProviders.filter((p) => p.checked);
+      const unavailableThreatProviders = threatProviders.filter((p) => p.status === 'unavailable');
+
+      if (unavailableThreatProviders.length > 0) {
+        const unavailableDetails = unavailableThreatProviders
+          .map((p) => (p.detail ? `${p.provider} (${p.detail})` : p.provider))
+          .join('; ');
+        analysis.unverifiedAspects.push(
+          checkedThreatProviders.length === 0
+            ? `All threat intelligence feeds unavailable: ${unavailableDetails}. Missing checks do not increase fraud risk.`
+            : `Partial threat intelligence coverage (${checkedThreatProviders.length}/${totalThreatProviders} checked); unavailable feeds: ${unavailableDetails}. Missing feeds are not scored as risk.`
+        );
+      }
+
       if (domainVerification.threatIntel.listed) {
         const providerNames = domainVerification.threatIntel.matches
           .map((m) => m.provider)
@@ -290,40 +321,61 @@ export class RiskScoringEngine {
             .join(' · '),
           remedyOrPrecaution: 'Do not visit, log in, or transact on this URL. It appears on an active phishing or malicious threat list.',
         });
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 20);
-      } else if (domainVerification.threatIntel.status === 'verified') {
-        const checkedProviders = domainVerification.threatIntel.providers
-          .filter((p) => p.checked)
-          .map((p) => p.provider)
-          .join(', ');
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 21);
+      } else if (
+        domainVerification.threatIntel.status === 'verified' &&
+        checkedThreatProviders.length > 0
+      ) {
+        const checkedNames = checkedThreatProviders.map((p) => p.provider).join(', ');
+        const isPartial = unavailableThreatProviders.length > 0;
+        const unavailableNames = unavailableThreatProviders.map((p) => p.provider).join(', ');
+
         analysis.positiveSignals.push({
           id: 'threat-intel-clean',
-          name: 'Threat Intelligence Check: Not Listed',
-          description: `Not listed in checked threat feeds (${checkedProviders}). Threat feeds do not catch newly launched phishing pages immediately.`,
+          name: isPartial
+            ? `Threat Intelligence Check: Not Listed (${checkedThreatProviders.length}/${totalThreatProviders} Feeds)`
+            : 'Threat Intelligence Check: Not Listed',
+          description: `Not listed in ${checkedNames} (${checkedThreatProviders.length}/${totalThreatProviders} feeds checked${
+            isPartial ? `; ${unavailableNames} unavailable` : ''
+          }). Being unlisted is NOT a guarantee of website safety—newly launched or targeted phishing pages may not yet appear in threat feeds.`,
           isVerified: true,
           scoreDeduction: 4,
         });
-        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
-      }
 
-      // Guardrail: HTTPS/TLS or old domain or clean ML URL profile must NEVER mask active severe threats
-      const hasCriticalLiveRisk =
-        domainVerification.threatIntel.listed ||
-        domainVerification.tls.status === 'suspicious' ||
-        domainVerification.redirects.suspiciousDestination ||
-        domainVerification.redirects.downgradeHttpsToHttp ||
-        domainVerification.dns.status === 'suspicious' ||
-        (domainVerification.rdap.domainAgeDays !== undefined && domainVerification.rdap.domainAgeDays < 30) ||
-        analysis.indicators.some((ind) => ind.severity === 'high');
-
-      if (hasCriticalLiveRisk) {
-        analysis.positiveSignals = analysis.positiveSignals
-          .filter((s) => s.id !== 'ml_benign_classification')
-          .map((s) => ({ ...s, scoreDeduction: 0 }));
+        const threatCoverageWeight =
+          totalThreatProviders > 0
+            ? Math.round(21 * (checkedThreatProviders.length / totalThreatProviders))
+            : 7;
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + threatCoverageWeight);
       }
     }
 
-    const score = this.calculateFinalScore(analysis.indicators, analysis.positiveSignals);
+    // Guardrail: HTTPS/TLS, official domain recognition, old domain, or clean ML must NEVER mask active severe threats
+    const hasCriticalLiveRisk = Boolean(
+      (domainVerification &&
+        !hasInvalidSyntax &&
+        (domainVerification.threatIntel.listed ||
+          domainVerification.tls.status === 'suspicious' ||
+          domainVerification.redirects.suspiciousDestination ||
+          domainVerification.redirects.downgradeHttpsToHttp ||
+          domainVerification.dns.status === 'suspicious' ||
+          (domainVerification.rdap.domainAgeDays !== undefined &&
+            domainVerification.rdap.domainAgeDays < 30))) ||
+        analysis.indicators.some((ind) => ind.severity === 'high')
+    );
+
+    if (hasCriticalLiveRisk) {
+      analysis.positiveSignals = analysis.positiveSignals
+        .filter((s) => s.id !== 'ml_benign_classification')
+        .map((s) => ({ ...s, scoreDeduction: 0 }));
+    }
+
+    const scoreBreakdown = this.calculateScoreBreakdown(
+      analysis.indicators,
+      analysis.positiveSignals,
+      hasCriticalLiveRisk
+    );
+    const score = scoreBreakdown.finalScore;
     const confidence = this.calculateConfidence(analysis.evidenceWeight);
     const category = getRiskCategory(score);
 
@@ -343,6 +395,7 @@ export class RiskScoringEngine {
       summary: this.generateSummary('website', category, analysis.indicators.length, analysis.positiveSignals.length),
       indicators: analysis.indicators,
       positiveSignals: analysis.positiveSignals,
+      scoreBreakdown,
       recommendations,
       unverifiedAspects: Array.from(new Set(analysis.unverifiedAspects)),
       mlPhishingPrediction: mlPred,
@@ -435,41 +488,7 @@ export class RiskScoringEngine {
       analysis.unverifiedAspects.push(...urlAnalysis.unverifiedAspects);
     }
 
-    // 2. Integrate trained Product Listing ML prediction (prevent double-counting overlapping risky URL feature)
-    if (mlProductPred.isHighRisk && mlProductPred.probability >= 0.65 && analysis.evidenceWeight >= 30) {
-      let mlProductImpact = Math.round(mlProductPred.probability * 22);
-      const urlAlreadyCountedInPhishing =
-        Boolean(mlPhishingPred && mlPhishingPred.isPhishing && mlPhishingPred.probability >= 0.60) &&
-        Boolean(mlProductPred.featuresExtracted?.hasRiskyListingUrl);
-
-      if (urlAlreadyCountedInPhishing) {
-        // Reduce overlap since Listing URL phishing risk is already scored under 'url'
-        mlProductImpact = Math.max(8, mlProductImpact - 6);
-      }
-
-      analysis.indicators.push({
-        id: 'ml_product_high_risk',
-        name: `Suspicious Listing ML Alert (${Math.round(mlProductPred.probability * 100)}% Risk Probability)`,
-        category: 'verification',
-        severity: mlProductPred.probability >= 0.85 ? 'high' : 'medium',
-        scoreImpact: mlProductImpact,
-        isObserved: true,
-        description: `Product Listing Logistic Regression (synthetic training corpus) flagged combined pricing, seller, and description markers (${Math.round(mlProductPred.probability * 100)}% risk probability). This measures suspicious listing metadata—not verified physical counterfeiting.`,
-        remedyOrPrecaution: 'Verify seller authorization, demand buyer-protected checkout, and cross-check manufacturer serials.',
-      });
-      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 15);
-    } else if (!mlProductPred.isHighRisk && mlProductPred.probability <= 0.30 && analysis.evidenceWeight >= 35) {
-      analysis.positiveSignals.push({
-        id: 'ml_product_benign_classification',
-        name: `Suspicious Listing ML Check: Lower-Risk Pattern (${Math.round((1 - mlProductPred.probability) * 100)}% Confidence)`,
-        description: 'Product listing classifier evaluated price context, seller signals, and return terms as lower-risk metadata patterns (not proof of physical authenticity).',
-        isVerified: true,
-        scoreDeduction: 12,
-      });
-      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
-    }
-
-    // 3. Integrate Real Seller Verification without double-counting user-submitted seller indicators
+    // 2. Integrate Real Seller Verification without double-counting user-submitted seller indicators
     if (sellerVerification) {
       const { retrieved, comparison } = sellerVerification;
 
@@ -530,9 +549,9 @@ export class RiskScoringEngine {
             name: `Verified Seller Rating (${retrieved.sellerRating}/5)`,
             description: `External listing metadata reports ${retrieved.sellerRating}/5 seller feedback${
               retrieved.sellerRatingCount ? ` across ${retrieved.sellerRatingCount.toLocaleString()} ratings` : ''
-            }.`,
+            } (seller rating reflects marketplace feedback, not physical item authenticity).`,
             isVerified: true,
-            scoreDeduction: 7,
+            scoreDeduction: 6,
           });
         }
         analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
@@ -614,14 +633,14 @@ export class RiskScoringEngine {
         analysis.positiveSignals = analysis.positiveSignals
           .filter((s) => s.id !== 'high-reported-rating')
           .map((s) =>
-            s.id === 'ml_product_benign_classification' || s.id === 'listing-url-phishing-clean'
+            s.id === 'listing-url-phishing-clean'
               ? { ...s, scoreDeduction: 0 }
               : s
           );
       }
     }
 
-    // 4. Integrate Real-World Market Price Comparison without double-counting manual pricing rules
+    // 3. Integrate Real-World Market Price Comparison without double-counting manual pricing rules
     if (marketPriceComparison) {
       const mStats = marketPriceComparison.stats;
       const cond = marketPriceComparison.inferredCondition;
@@ -723,11 +742,153 @@ export class RiskScoringEngine {
       }
     }
 
+    // 4. Integrate Product Listing ML Classifier AFTER rule/external checks so overlapping signals are audited & deduplicated
+    if (mlProductPred.isHighRisk && mlProductPred.probability >= 0.65 && analysis.evidenceWeight >= 30) {
+      const mlFeats = mlProductPred.featuresExtracted || {};
+      const activeDrivers: Array<{ label: string; coveredByRule: boolean }> = [
+        {
+          label: 'replica keywords',
+          coveredByRule: Boolean(mlFeats.hasReplicaKeyword) &&
+            analysis.indicators.some((i) => i.id.startsWith('replica-term-')),
+          active: Boolean(mlFeats.hasReplicaKeyword),
+        },
+        {
+          label: 'unprotected payment demand',
+          coveredByRule: Boolean(mlFeats.hasPaymentPressureKeyword) &&
+            analysis.indicators.some((i) => i.id === 'unsafe-payment-tactic'),
+          active: Boolean(mlFeats.hasPaymentPressureKeyword),
+        },
+        {
+          label: 'no return policy',
+          coveredByRule: Boolean(mlFeats.noReturnPolicy) &&
+            analysis.indicators.some(
+              (i) => i.id === 'no-return-policy' || i.id === 'seller-return-policy-mismatch'
+            ),
+          active: Boolean(mlFeats.noReturnPolicy),
+        },
+        {
+          label: 'low seller rating',
+          coveredByRule: Boolean(mlFeats.lowSellerRating) &&
+            analysis.indicators.some(
+              (i) => i.id === 'low-seller-rating' || i.id === 'verified-low-seller-rating'
+            ),
+          active: Boolean(mlFeats.lowSellerRating),
+        },
+        {
+          label: 'generic seller handle',
+          coveredByRule: Boolean(mlFeats.isGenericSellerHandle) &&
+            analysis.indicators.some(
+              (i) =>
+                i.id === 'generic-seller-handle' || i.id === 'verified-suspicious-seller-handle'
+            ),
+          active: Boolean(mlFeats.isGenericSellerHandle),
+        },
+        {
+          label: 'extreme discount',
+          coveredByRule: Boolean(mlFeats.isExtremeDiscount) &&
+            analysis.indicators.some(
+              (i) =>
+                i.id === 'steep-discount-investigation' ||
+                i.id === 'moderate-discount-caution' ||
+                i.id === 'market-price-extreme-discount' ||
+                i.id === 'market-price-significant-discount' ||
+                i.id === 'market-price-clearance-refurb-discount'
+            ),
+          active: Boolean(mlFeats.isExtremeDiscount),
+        },
+        {
+          label: 'risky listing URL',
+          coveredByRule: Boolean(mlFeats.hasRiskyListingUrl) &&
+            analysis.indicators.some((i) => i.category === 'url'),
+          active: Boolean(mlFeats.hasRiskyListingUrl),
+        },
+      ]
+        .filter((d) => d.active)
+        .map(({ label, coveredByRule }) => ({ label, coveredByRule }));
+
+      const overlappedDrivers = activeDrivers.filter((d) => d.coveredByRule);
+      const unbackedDrivers = activeDrivers.filter((d) => !d.coveredByRule);
+
+      const baseImpact = Math.round(mlProductPred.probability * 20);
+      const hasMajorExplicitRule = analysis.indicators.some(
+        (i) => i.severity === 'high' && i.scoreImpact >= 35
+      );
+
+      let mlProductImpact = baseImpact;
+      if (activeDrivers.length > 0 && unbackedDrivers.length === 0) {
+        // Every active ML risk driver is already scored by explicit heuristic/external rules
+        mlProductImpact = hasMajorExplicitRule ? 0 : Math.min(5, Math.round(mlProductPred.probability * 5));
+      } else if (overlappedDrivers.length > 0 && activeDrivers.length > 0) {
+        mlProductImpact = Math.max(
+          5,
+          Math.round(baseImpact * (unbackedDrivers.length / activeDrivers.length))
+        );
+      }
+
+      const dedupNote =
+        overlappedDrivers.length > 0
+          ? ` Score impact adjusted to +${mlProductImpact} (from base +${baseImpact}) to prevent double-counting already-scored rules (${overlappedDrivers.map((d) => d.label).join(', ')}).`
+          : '';
+
+      analysis.indicators.push({
+        id: 'ml_product_high_risk',
+        name: `Suspicious Listing ML Alert (${Math.round(mlProductPred.probability * 100)}% Risk Probability)`,
+        category: 'verification',
+        severity: mlProductPred.probability >= 0.85 ? 'high' : 'medium',
+        scoreImpact: mlProductImpact,
+        isObserved: true,
+        description: `Synthetic-data-trained Product Listing Logistic Regression classifier flagged combined pricing, seller, and description markers (${Math.round(mlProductPred.probability * 100)}% risk probability).${dedupNote} This measures suspicious listing metadata—not verified real-world counterfeiting.`,
+        remedyOrPrecaution: 'Verify seller authorization, demand buyer-protected checkout, and cross-check manufacturer serials.',
+      });
+      analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 12);
+    } else if (!mlProductPred.isHighRisk && mlProductPred.probability <= 0.30 && analysis.evidenceWeight >= 40) {
+      // Valid barcodes, self-reported high ratings, and unverified warranty/authorized claims alone
+      // must NOT earn an ML risk deduction without corroborated return/price/official-seller signals.
+      const hasCorroboratedPositiveSignal = analysis.positiveSignals.some((s) =>
+        [
+          'returns-accepted',
+          'market-aligned-pricing',
+          'verified-market-aligned-pricing',
+          'seller-official-merchant-confirmed',
+          'verified-seller-rating',
+        ].includes(s.id)
+      );
+      const hasHighSeverityIndicator = analysis.indicators.some((i) => i.severity === 'high');
+
+      if (hasCorroboratedPositiveSignal && !hasHighSeverityIndicator) {
+        analysis.positiveSignals.push({
+          id: 'ml_product_benign_classification',
+          name: `Suspicious Listing ML Check: Lower-Risk Pattern (${Math.round((1 - mlProductPred.probability) * 100)}% Confidence)`,
+          description: 'Synthetic-data-trained product listing risk classifier evaluated price context, seller signals, and return terms as lower-risk metadata patterns (not proof of physical authenticity).',
+          isVerified: true,
+          scoreDeduction: 10,
+        });
+        analysis.evidenceWeight = Math.min(100, analysis.evidenceWeight + 10);
+      }
+    }
+
+    const hasCriticalProductRisk = Boolean(
+      analysis.indicators.some((ind) => ind.severity === 'high') ||
+        sellerVerification?.comparison.sellerNameMatch === 'mismatch' ||
+        sellerVerification?.comparison.returnPolicyMismatch
+    );
+
+    if (hasCriticalProductRisk) {
+      analysis.positiveSignals = analysis.positiveSignals
+        .filter((s) => s.id !== 'ml_product_benign_classification')
+        .map((s) => ({ ...s, scoreDeduction: 0 }));
+    }
+
     analysis.unverifiedAspects.push(
       'Physical item in-hand authenticity & serial ownership (separate from website phishing risk and listing metadata risk)'
     );
 
-    const score = this.calculateFinalScore(analysis.indicators, analysis.positiveSignals);
+    const scoreBreakdown = this.calculateScoreBreakdown(
+      analysis.indicators,
+      analysis.positiveSignals,
+      hasCriticalProductRisk
+    );
+    const score = scoreBreakdown.finalScore;
     const confidence = this.calculateConfidence(analysis.evidenceWeight);
     const category = getRiskCategory(score);
 
@@ -753,6 +914,7 @@ export class RiskScoringEngine {
       summary: this.generateSummary('product', category, analysis.indicators.length, analysis.positiveSignals.length),
       indicators: analysis.indicators,
       positiveSignals: analysis.positiveSignals,
+      scoreBreakdown,
       recommendations,
       unverifiedAspects: Array.from(new Set(analysis.unverifiedAspects)),
       mlPhishingPrediction: mlPhishingPred,
@@ -820,7 +982,8 @@ export class RiskScoringEngine {
       }
     }
 
-    const score = this.calculateFinalScore(analysis.indicators, analysis.positiveSignals);
+    const scoreBreakdown = this.calculateScoreBreakdown(analysis.indicators, analysis.positiveSignals, false);
+    const score = scoreBreakdown.finalScore;
     const confidence = this.calculateConfidence(analysis.evidenceWeight);
     const category = getRiskCategory(score);
 
@@ -841,6 +1004,7 @@ export class RiskScoringEngine {
       summary: this.generateSummary('code', category, analysis.indicators.length, analysis.positiveSignals.length),
       indicators: analysis.indicators,
       positiveSignals: analysis.positiveSignals,
+      scoreBreakdown,
       recommendations,
       unverifiedAspects: Array.from(new Set(analysis.unverifiedAspects)),
       mlPhishingPrediction: mlPhishingPred,
@@ -854,16 +1018,32 @@ export class RiskScoringEngine {
   }
 
   /**
-   * Calibrated Scoring Algorithm
+   * Calibrated Scoring Algorithm with full contribution transparency.
    * Sums indicator impacts with category-based caps to prevent double-counting.
    */
-  private static calculateFinalScore(indicators: RiskIndicator[], positiveSignals: PositiveSignal[]): number {
+  private static calculateScoreBreakdown(
+    indicators: RiskIndicator[],
+    positiveSignals: PositiveSignal[],
+    deductionsZeroedByCriticalRisk: boolean
+  ): ScoreBreakdown {
+    const POSITIVE_DEDUCTION_CAP = 35;
+
     if (indicators.length === 0 && positiveSignals.length === 0) {
-      return 15; // neutral baseline with minimal data
+      return {
+        baselineScore: 15,
+        categoryBreakdown: [],
+        indicatorsRawTotal: 0,
+        indicatorsAppliedTotal: 0,
+        grossScore: 15,
+        rawPositiveDeduction: 0,
+        positiveDeductionCap: POSITIVE_DEDUCTION_CAP,
+        appliedPositiveDeduction: 0,
+        deductionsZeroedByCriticalRisk: false,
+        finalScore: 15,
+      };
     }
 
-    // Group impacts by category to cap repetitive signals
-    const categoryTotals: Record<string, number> = {
+    const categoryTotals: Record<RiskIndicator['category'], number> = {
       url: 0,
       seller: 0,
       pricing: 0,
@@ -872,7 +1052,7 @@ export class RiskScoringEngine {
       technical: 0,
     };
 
-    const CATEGORY_CAPS: Record<string, number> = {
+    const CATEGORY_CAPS: Record<RiskIndicator['category'], number> = {
       url: 55,
       seller: 35,
       pricing: 25, // Rule: Pricing alone never exceeds 25 (cannot jump past Lower without other red flags!)
@@ -886,19 +1066,48 @@ export class RiskScoringEngine {
       categoryTotals[cat] = (categoryTotals[cat] || 0) + ind.scoreImpact;
     }
 
-    // Apply caps
-    let grossScore = 5; // baseline starting point
-    for (const cat in categoryTotals) {
-      const cap = CATEGORY_CAPS[cat] || 40;
-      grossScore += Math.min(categoryTotals[cat], cap);
-    }
+    const baselineScore = 5;
+    const categoryBreakdown: ScoreCategoryBreakdown[] = [];
+    let indicatorsRawTotal = 0;
+    let indicatorsAppliedTotal = 0;
 
-    // Apply positive signal deductions (capped at 35 total deduction)
-    const positiveDeduction = positiveSignals.reduce((acc, sig) => acc + sig.scoreDeduction, 0);
-    const cappedDeduction = Math.min(positiveDeduction, 35);
+    (Object.keys(categoryTotals) as Array<RiskIndicator['category']>).forEach((cat) => {
+      const rawTotal = categoryTotals[cat];
+      if (rawTotal > 0) {
+        const cap = CATEGORY_CAPS[cat] || 40;
+        const appliedTotal = Math.min(rawTotal, cap);
+        indicatorsRawTotal += rawTotal;
+        indicatorsAppliedTotal += appliedTotal;
+        categoryBreakdown.push({
+          category: cat,
+          rawTotal,
+          cap,
+          appliedTotal,
+        });
+      }
+    });
 
-    const finalScore = Math.max(0, Math.min(100, Math.round(grossScore - cappedDeduction)));
-    return finalScore;
+    const grossScore = baselineScore + indicatorsAppliedTotal;
+    const rawPositiveDeduction = positiveSignals.reduce((acc, sig) => acc + sig.scoreDeduction, 0);
+    const appliedPositiveDeduction = Math.min(rawPositiveDeduction, POSITIVE_DEDUCTION_CAP);
+    const finalScore = Math.max(0, Math.min(100, Math.round(grossScore - appliedPositiveDeduction)));
+
+    return {
+      baselineScore,
+      categoryBreakdown,
+      indicatorsRawTotal,
+      indicatorsAppliedTotal,
+      grossScore,
+      rawPositiveDeduction,
+      positiveDeductionCap: POSITIVE_DEDUCTION_CAP,
+      appliedPositiveDeduction,
+      deductionsZeroedByCriticalRisk,
+      finalScore,
+    };
+  }
+
+  private static calculateFinalScore(indicators: RiskIndicator[], positiveSignals: PositiveSignal[]): number {
+    return this.calculateScoreBreakdown(indicators, positiveSignals, false).finalScore;
   }
 
   /**

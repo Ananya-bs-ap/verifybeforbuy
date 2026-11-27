@@ -203,6 +203,9 @@ export const WebsiteCheckerPage: React.FC = () => {
         <div className="pt-4">
           <VerificationReport
             result={currentResult}
+            onSave={(updated) => {
+              void HistoryService.saveRecord(updated);
+            }}
             onReset={() => {
               setCurrentResult(null);
               setUrlInput('');

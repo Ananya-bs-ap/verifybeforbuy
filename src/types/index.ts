@@ -30,6 +30,26 @@ export interface PositiveSignal {
   scoreDeduction: number;
 }
 
+export interface ScoreCategoryBreakdown {
+  category: RiskIndicator['category'];
+  rawTotal: number;
+  cap: number;
+  appliedTotal: number;
+}
+
+export interface ScoreBreakdown {
+  baselineScore: number;
+  categoryBreakdown: ScoreCategoryBreakdown[];
+  indicatorsRawTotal: number;
+  indicatorsAppliedTotal: number;
+  grossScore: number;
+  rawPositiveDeduction: number;
+  positiveDeductionCap: number;
+  appliedPositiveDeduction: number;
+  deductionsZeroedByCriticalRisk: boolean;
+  finalScore: number;
+}
+
 export interface AssessmentResult {
   id: string;
   timestamp: string;
@@ -51,10 +71,13 @@ export interface AssessmentResult {
   summary: string;
   indicators: RiskIndicator[];
   positiveSignals: PositiveSignal[];
+  scoreBreakdown?: ScoreBreakdown;
   recommendations: string[];
   unverifiedAspects: string[];
   aiExplanation?: string;
   aiExplanationProvider?: 'gemini' | 'deterministic-fallback';
+  aiExplanationModel?: string;
+  aiExplanationFallbackReason?: string;
   mlPhishingPrediction?: MlPhishingResult;
   mlProductPrediction?: MlProductResult;
   barcodeLookup?: BarcodeLookupResult;
@@ -70,6 +93,8 @@ export interface MlModelMetrics {
   precision: number;
   recall: number;
   f1Score: number;
+  rocAuc?: number;
+  prAuc?: number;
   confusionMatrix: {
     truePositives: number;
     falsePositives: number;
@@ -95,6 +120,15 @@ export interface MlPhishingResult {
   serviceAvailable: boolean;
 }
 
+export interface MlProductSplitMetadata {
+  strategy: string;
+  totalGroups?: number;
+  mixedLabelGroups?: number;
+  featureVectorOverlap: number;
+  listingTemplateOverlap: number;
+  coarseDescriptionOverlapNote?: string;
+}
+
 export interface MlProductResult {
   productName: string;
   isHighRisk: boolean;
@@ -108,6 +142,7 @@ export interface MlProductResult {
   trainingSamples?: number;
   samplesTested?: number;
   isSyntheticDataset?: boolean;
+  splitMetadata?: MlProductSplitMetadata;
   metrics?: MlModelMetrics;
   featuresExtracted?: Record<string, any>;
   indicatorsFlagged: string[];
@@ -456,22 +491,47 @@ export interface MarketPriceComparisonResult {
 
 export interface SavedScanRecord {
   id: string;
-  userId?: string;
+  clientScanId?: string;
+  userId?: string | null;
   createdAt: string;
+  updatedAt?: string;
   type: AssessmentType;
   target: string;
   score: number;
   category: RiskCategory;
   confidence: EvidenceCoverage;
+  isDemo?: boolean;
   result: AssessmentResult;
   storageSource: 'local' | 'supabase';
 }
+
+export interface AuthUserProfile {
+  id: string;
+  email: string;
+  displayName: string;
+  avatarUrl?: string;
+  createdAt?: string;
+  emailConfirmed?: boolean;
+}
+
+export type AuthChangeEventType =
+  | 'INITIAL_SESSION'
+  | 'SIGNED_IN'
+  | 'SIGNED_OUT'
+  | 'PASSWORD_RECOVERY'
+  | 'TOKEN_REFRESHED'
+  | 'USER_UPDATED';
 
 export interface SupabaseConfigStatus {
   isConfigured: boolean;
   urlConfigured: boolean;
   anonKeyConfigured: boolean;
-  connectionState: 'unconfigured' | 'connected' | 'error';
+  connectionState: 'unconfigured' | 'checking' | 'connected' | 'error';
+  schemaReady?: boolean;
+  authUserId?: string | null;
+  authEmail?: string | null;
+  lastCheckedAt?: string;
   errorMessage?: string;
   projectId?: string;
 }
+

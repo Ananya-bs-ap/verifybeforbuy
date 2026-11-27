@@ -8,7 +8,6 @@ import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
 import { RiskScoringEngine } from './src/lib/riskEngine/engine.ts';
 import { predictPhishing, getModelMetadata } from './src/lib/mlInference.ts';
 import { predictProductRisk, getProductModelMetadata } from './src/lib/productMlInference.ts';
@@ -25,6 +24,11 @@ import { lookupBarcodeProduct } from './server/barcodeLookupService.ts';
 import { verifyWebsiteDomain } from './server/domainVerificationService.ts';
 import { verifySellerInfo } from './server/sellerVerificationService.ts';
 import { compareMarketPrices } from './server/marketPriceService.ts';
+import {
+  generateRiskExplanation,
+  resolveGeminiModel,
+  resolveServerGeminiApiKey,
+} from './server/geminiExplanationService.ts';
 import { validateGs1BarcodeFormat } from './src/lib/riskEngine/codeAnalyzer.ts';
 import { AssessmentResult, WebsiteAnalysisInput, ProductAnalysisInput, CodeAnalysisInput } from './src/types/index.ts';
 
@@ -34,25 +38,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isProd = process.env.NODE_ENV === 'production';
 const PORT = parseInt(process.env.PORT || '3000', 10);
-
-// Initialize Gemini client strictly on server-side if key is available
-const geminiApiKey = process.env.GEMINI_API_KEY;
-let ai: GoogleGenAI | null = null;
-
-if (geminiApiKey && !geminiApiKey.includes('MY_GEMINI_API_KEY')) {
-  try {
-    ai = new GoogleGenAI({
-      apiKey: geminiApiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-  } catch (err) {
-    console.warn('Failed to initialize Gemini AI client:', err);
-  }
-}
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -94,7 +79,8 @@ app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    geminiConfigured: Boolean(ai),
+    geminiConfigured: Boolean(resolveServerGeminiApiKey()),
+    geminiModel: resolveGeminiModel(),
     serverMode: isProd ? 'production' : 'development',
   });
 });
@@ -487,7 +473,7 @@ app.post('/api/analyze/code', async (req: Request, res: Response) => {
   }
 });
 
-// 5. AI Risk Explanation Endpoint
+// 5. AI Risk Explanation Endpoint (server-side Gemini with prompt-injection defense & deterministic fallback)
 app.post('/api/explain', async (req: Request, res: Response) => {
   try {
     const result: AssessmentResult = req.body;
@@ -496,96 +482,13 @@ app.post('/api/explain', async (req: Request, res: Response) => {
       return;
     }
 
-    // If Gemini client is available, generate contextual explanation
-    if (ai) {
-      try {
-        const prompt = `
-You are the VerifyBeforeBuy AI consumer protection analyst. Explain the following structured shopping risk findings in plain, objective, reassuring, and practical terms:
-
-Assessment Type: ${result.type}
-Target: ${result.inputSummary.target}
-Assessed Risk Score: ${result.score}/100 (${result.category.toUpperCase()} RISK)
-Evidence Coverage: ${result.confidence} (${result.confidenceScore}%)
-
-Detected Warning Indicators:
-${result.indicators.map(i => `- [${i.severity.toUpperCase()}] ${i.name}: ${i.description}`).join('\n') || 'None'}
-
-Positive Signals:
-${result.positiveSignals.map(s => `- ${s.name}: ${s.description}`).join('\n') || 'None'}
-
-Unverified Aspects:
-${result.unverifiedAspects.map(u => `- ${u}`).join('\n')}
-
-Guidelines:
-1. Explain what the findings mean in plain language (2 concise paragraphs).
-2. Clearly distinguish observed technical evidence from unverified claims.
-3. Crucial rule: Never declare that a product is 100% genuine or fake solely based on price, URL, or images. Explain that risk assessment is a caution index.
-4. Conclude with 2-3 specific precautions the buyer should take.
-`;
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'You are a cybersecurity and consumer rights analyst providing calibrated risk summaries. Avoid sensationalism. Never claim authenticity proof. Be helpful and clear.',
-          },
-        });
-
-        const text = response.text || '';
-        res.json({
-          explanation: text,
-          provider: 'gemini',
-        });
-        return;
-      } catch (geminiError: any) {
-        console.warn('Gemini explanation call failed, falling back to deterministic explanation:', geminiError.message);
-      }
-    }
-
-    // Deterministic Fallback Explanation (Standardized, clear, and domain-grounded)
-    const fallbackText = generateDeterministicExplanation(result);
-    res.json({
-      explanation: fallbackText,
-      provider: 'deterministic-fallback',
-    });
+    const explanationResponse = await generateRiskExplanation(result);
+    res.json(explanationResponse);
   } catch (error: any) {
     console.error('Explanation endpoint error:', error);
     res.status(500).json({ error: error.message || 'Failed to generate explanation.' });
   }
 });
-
-function generateDeterministicExplanation(result: AssessmentResult): string {
-  const parts: string[] = [];
-
-  if (result.category === 'lower') {
-    parts.push(
-      `Based on the available information for "${result.inputSummary.target}", our analysis did not identify significant deceptive indicators. The overall risk score of ${result.score}/100 places this in the lower assessed risk tier. Positive attributes such as valid standard formatting and absence of common phishing anomalies were noted.`
-    );
-  } else if (result.category === 'moderate') {
-    parts.push(
-      `Our analysis calculated a moderate risk score of ${result.score}/100 for "${result.inputSummary.target}". While there is no immediate proof of malicious intent, specific factors such as pricing variance, seller history gaps, or domain features warrant extra diligence before you proceed.`
-    );
-  } else if (result.category === 'elevated') {
-    parts.push(
-      `The evaluated listing for "${result.inputSummary.target}" returned an elevated risk score of ${result.score}/100. We identified multiple warning signals (such as unverified brand claims, suspicious web syntax, or lack of standard buyer protections). Extreme caution is recommended.`
-    );
-  } else {
-    parts.push(
-      `CRITICAL NOTICE: High-risk indicators were detected for "${result.inputSummary.target}" (Risk Score: ${result.score}/100). The patterns observed closely resemble known deception mechanisms, such as brand lookalike domains, deceptive payment methods, or direct replica disclosures.`
-    );
-  }
-
-  parts.push(
-    `Important context: Risk scoring evaluates probability patterns and public markers, but it is not physical proof of authenticity or guaranteed fraud. Notably, ${result.unverifiedAspects.slice(0, 2).join(' and ')} remain unverified.`
-  );
-
-  parts.push(
-    `Recommended Next Steps:\n1. Use payment methods with guaranteed dispute rights (e.g. major credit cards with zero fraud liability).\n2. Independently verify the merchant contact address and phone support.\n3. Request official manufacturer serial numbers or authorized retailer proof if buying high-value goods.`
-  );
-
-  return parts.join('\n\n');
-}
 
 // Dev vs Prod Vite Integration
 async function startServer() {
