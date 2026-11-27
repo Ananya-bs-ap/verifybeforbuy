@@ -25,6 +25,7 @@ import {
   validateEmailAddress,
   validatePasswordStrength,
 } from '../lib/supabase/authService';
+import { supabaseConfigStatus } from '../lib/supabase/client';
 import { NavTab } from '../components/Navbar';
 
 interface LoginPageProps {
@@ -125,11 +126,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onNavigate, onAuthSuccess 
           <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
             <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <p className="font-semibold">Supabase Auth is not configured in this environment.</p>
+              <p className="font-semibold">
+                {supabaseConfigStatus.errorMessage || 'Supabase Auth is not configured in this environment.'}
+              </p>
               <p className="text-[11px] text-amber-800">
                 You can continue using all Website, Product, and Barcode checks in Guest mode with local browser history, or configure{' '}
                 <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
-                <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>.
+                <code className="font-mono">VITE_SUPABASE_PUBLISHABLE_KEY</code> (or{' '}
+                <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>).
               </p>
             </div>
           </div>
@@ -398,11 +402,14 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onNavigate, onAuthSu
           <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
             <Info className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <p className="font-semibold">Supabase Auth is not configured in this environment.</p>
+              <p className="font-semibold">
+                {supabaseConfigStatus.errorMessage || 'Supabase Auth is not configured in this environment.'}
+              </p>
               <p className="text-[11px] text-amber-800">
                 Verification tools remain available in Guest mode without an account. To enable registration, set{' '}
                 <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
-                <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>.
+                <code className="font-mono">VITE_SUPABASE_PUBLISHABLE_KEY</code> (or{' '}
+                <code className="font-mono">VITE_SUPABASE_ANON_KEY</code>).
               </p>
             </div>
           </div>

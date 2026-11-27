@@ -178,7 +178,7 @@ export const HistoryDashboardPage: React.FC<HistoryDashboardPageProps> = ({
                 ? `Signed in as ${authUser?.displayName} (${authUser?.email}) — syncing private scans to Supabase PostgreSQL.`
                 : dbStatus.connectionState === 'error'
                   ? `Database check failed: ${dbStatus.errorMessage || 'Unable to reach Supabase'}. Scans for ${authUser?.email} are isolated in local fallback storage.`
-                  : `Signed in as ${authUser?.displayName}. Configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY for cloud sync.`}
+                  : `Signed in as ${authUser?.displayName}. Configure VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY (or VITE_SUPABASE_ANON_KEY) for cloud sync.`}
           </p>
         </div>
 
@@ -476,7 +476,7 @@ export const HistoryDashboardPage: React.FC<HistoryDashboardPageProps> = ({
 
             <div className="text-xs text-slate-400 space-y-1.5">
               <p>
-                2. Set <code className="text-teal-300">VITE_SUPABASE_URL</code> and your public publishable/anon key <code className="text-teal-300">VITE_SUPABASE_ANON_KEY</code> in <code className="text-slate-300">.env</code> (for local VS Code) or Google AI Studio environment settings.
+                2. Set <code className="text-teal-300">VITE_SUPABASE_URL</code> and your public publishable/anon key (<code className="text-teal-300">VITE_SUPABASE_PUBLISHABLE_KEY</code> or <code className="text-teal-300">VITE_SUPABASE_ANON_KEY</code>) in <code className="text-slate-300">.env</code> (for local VS Code) or Google AI Studio environment settings.
               </p>
               <p className="text-[11px] text-amber-300/90">
                 Never place a <code className="font-mono">service_role</code> or <code className="font-mono">sb_secret_</code> key in frontend <code className="font-mono">VITE_</code> variables.

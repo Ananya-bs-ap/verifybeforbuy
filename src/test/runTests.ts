@@ -41,6 +41,12 @@ import {
   generateRiskExplanation,
   sanitizeUntrustedText,
 } from '../../server/geminiExplanationService';
+import {
+  classifyCameraError,
+  computeResponsiveQrBox,
+  evaluateCameraEnvironment,
+  pickPreferredCamera,
+} from '../lib/cameraScannerHelper';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -2851,6 +2857,278 @@ const tests: TestCase[] = [
       return {
         passed: dedupApplied,
         message: `ML prob=${overlapped.mlProductPrediction?.probability}, mlImpact=${mlInd?.scoreImpact}, finalScore=${overlapped.score}`,
+      };
+    },
+  },
+
+  {
+    name: 'Rule 51: Gemini explanation service retries transient errors cleanly, respects AbortSignal timeouts, and skips retries on 401/404',
+    run: async () => {
+      const site = RiskScoringEngine.assessWebsite({ url: 'https://example.com' });
+
+      // 1. Transient 503 then success on attempt 2
+      let transientAttempts = 0;
+      const retrySuccess = await generateRiskExplanation(site, {
+        maxAttempts: 3,
+        retryDelayMs: 10,
+        timeoutMs: 3_000,
+        generateContentFn: async () => {
+          transientAttempts++;
+          if (transientAttempts === 1) {
+            const err: any = new Error('503 UNAVAILABLE: Service temporarily overloaded');
+            err.status = 503;
+            throw err;
+          }
+          return 'Lower risk summary grounded in verified checks. Check domain identity and use protected payments.';
+        },
+      });
+
+      // 2. Permanent 401 must NOT retry (1 attempt only -> fast fallback)
+      let permAttempts = 0;
+      const permFail = await generateRiskExplanation(site, {
+        maxAttempts: 3,
+        retryDelayMs: 10,
+        timeoutMs: 3_000,
+        generateContentFn: async () => {
+          permAttempts++;
+          const err: any = new Error('API_KEY_INVALID');
+          err.status = 401;
+          throw err;
+        },
+      });
+
+      // 3. Hung request triggers AbortSignal timeout and falls back deterministically
+      let abortFired = false;
+      const timeoutFallback = await generateRiskExplanation(site, {
+        maxAttempts: 2,
+        retryDelayMs: 10,
+        timeoutMs: 180,
+        generateContentFn: async ({ signal }) =>
+          new Promise<string>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              abortFired = true;
+              reject(new Error('Aborted due to deadline'));
+            });
+          }),
+      });
+
+      // 4. Empty/too-short response falls back cleanly
+      const invalidShortFallback = await generateRiskExplanation(site, {
+        maxAttempts: 1,
+        generateContentFn: async () => 'ok',
+      });
+
+      const passed =
+        retrySuccess.provider === 'gemini' &&
+        transientAttempts === 2 &&
+        permFail.provider === 'deterministic-fallback' &&
+        permAttempts === 1 &&
+        timeoutFallback.provider === 'deterministic-fallback' &&
+        Boolean(timeoutFallback.fallbackReason?.toLowerCase().includes('timed out')) &&
+        abortFired &&
+        invalidShortFallback.provider === 'deterministic-fallback';
+
+      return {
+        passed,
+        message: `RetryRecovered=${retrySuccess.provider === 'gemini'}(attempts=${transientAttempts}), PermNoRetry=${permAttempts === 1}, TimeoutAborted=${abortFired}(${timeoutFallback.fallbackReason}), InvalidShortFallback=${invalidShortFallback.provider}`,
+      };
+    },
+  },
+
+  {
+    name: 'Rule 52: Gemini evidence payload & deterministic fallback cover QR phishing, barcode mismatch, market price anomaly, DNS/TLS/RDAP, and provenance separation',
+    run: () => {
+      // 1. QR URL phishing assessment
+      const qrPhish = RiskScoringEngine.assessCode({
+        code: 'https://paypal-verify-login.xyz/signin',
+        format: 'QR_CODE',
+      });
+      const qrEvidence = buildSanitizedEvidencePayload(qrPhish) as any;
+      const qrFallback = generateRiskExplanation(qrPhish);
+
+      // 2. Barcode invalid checksum mismatch assessment
+      const badBarcode = RiskScoringEngine.assessCode({
+        code: '012000000139', // invalid Modulo-10 check digit
+        format: 'UPC_A',
+      });
+      const barcodeEvidence = buildSanitizedEvidencePayload(badBarcode) as any;
+
+      // 3. Full product with market price anomaly + user-provided claims
+      const priceAnomalyProduct = RiskScoringEngine.assessProduct({
+        productName: 'Sony WH-1000XM5 Headphones',
+        brand: 'Sony',
+        listedPrice: 45,
+        referencePrice: 399,
+        currency: 'USD',
+        sellerName: 'flash_deals_99',
+      });
+      const prodEvidence = buildSanitizedEvidencePayload(priceAnomalyProduct) as any;
+
+      const qrOk =
+        Boolean(qrEvidence.qrAndCodeDetection?.isQrUrlPayload) &&
+        Boolean(qrEvidence.qrAndCodeDetection?.qrPhishingMlChecked) &&
+        Boolean(qrEvidence.websitePhishingMl);
+
+      const barcodeOk =
+        barcodeEvidence.qrAndCodeDetection?.gs1ChecksumValid === false &&
+        barcodeEvidence.riskIndicators.some((i: any) => i.id === 'invalid-gs1-checksum');
+
+      const provenanceOk =
+        Array.isArray(prodEvidence.dataProvenanceSummary?.verifiedOrObservedChecks) &&
+        prodEvidence.dataProvenanceSummary.verifiedOrObservedChecks.length > 0 &&
+        Array.isArray(prodEvidence.dataProvenanceSummary?.userProvidedUnverifiedClaims) &&
+        prodEvidence.dataProvenanceSummary.userProvidedUnverifiedClaims.length > 0 &&
+        Array.isArray(prodEvidence.dataProvenanceSummary?.unavailableOrRestrictedChecks);
+
+      return {
+        passed: qrOk && barcodeOk && provenanceOk && Boolean(qrFallback),
+        message: `QRCodeGrounded=${qrOk}, InvalidBarcodeGrounded=${barcodeOk}, ProvenanceSeparated=${provenanceOk}`,
+      };
+    },
+  },
+
+  {
+    name: 'Rule 53: Camera scanner validates secure context/iframe permissions, selects mobile rear or laptop webcams, and classifies camera errors clearly',
+    run: () => {
+      const insecure = evaluateCameraEnvironment({
+        isSecureContext: false,
+        protocol: 'http:',
+        hostname: 'shop.example.com',
+        hasMediaDevices: true,
+        hasGetUserMedia: true,
+      });
+
+      const iframeBlocked = evaluateCameraEnvironment({
+        isSecureContext: true,
+        protocol: 'https:',
+        hostname: 'preview.run.app',
+        hasMediaDevices: true,
+        hasGetUserMedia: true,
+        isIframe: true,
+        policyAllowsCamera: false,
+      });
+
+      const denied = evaluateCameraEnvironment({
+        isSecureContext: true,
+        protocol: 'https:',
+        hostname: 'localhost',
+        hasMediaDevices: true,
+        hasGetUserMedia: true,
+        permissionState: 'denied',
+      });
+
+      const ready = evaluateCameraEnvironment({
+        isSecureContext: true,
+        protocol: 'https:',
+        hostname: 'localhost',
+        hasMediaDevices: true,
+        hasGetUserMedia: true,
+        isIframe: true,
+        policyAllowsCamera: true,
+        permissionState: 'prompt',
+      });
+
+      const mobilePick = pickPreferredCamera([
+        { id: 'cam-front', label: 'Front Camera' },
+        { id: 'cam-back', label: 'camera2 0, facing back' },
+      ]);
+      const laptopPick = pickPreferredCamera([
+        { id: 'cam-laptop', label: 'Integrated Webcam (04f2:b72a)' },
+      ]);
+
+      const narrowBox = computeResponsiveQrBox(240, 200);
+      const desktopBox = computeResponsiveQrBox(448, 336);
+
+      const errDenied = classifyCameraError(Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' }), { isIframe: true });
+      const errNotFound = classifyCameraError('Error getting userMedia, error = NotFoundError: Requested device not found');
+      const errOverconstrained = classifyCameraError(Object.assign(new Error('Constraint failed'), { name: 'OverconstrainedError' }));
+      const errInUse = classifyCameraError(Object.assign(new Error('Could not start video source'), { name: 'NotReadableError' }));
+
+      const passed =
+        !insecure.supported &&
+        Boolean(insecure.errorMessage?.includes('HTTPS')) &&
+        !iframeBlocked.supported &&
+        iframeBlocked.policyBlocked &&
+        !denied.supported &&
+        ready.supported &&
+        mobilePick?.id === 'cam-back' &&
+        laptopPick?.id === 'cam-laptop' &&
+        narrowBox.width > 0 &&
+        narrowBox.width <= 240 &&
+        desktopBox.width > 200 &&
+        desktopBox.width <= 448 &&
+        errDenied.code === 'permission_denied' &&
+        !errDenied.retryableWithFallback &&
+        errNotFound.code === 'not_found' &&
+        errNotFound.retryableWithFallback &&
+        errOverconstrained.code === 'overconstrained' &&
+        errOverconstrained.retryableWithFallback &&
+        errInUse.code === 'in_use';
+
+      return {
+        passed,
+        message: `EnvChecks=${!insecure.supported && !iframeBlocked.supported && !denied.supported && ready.supported}, Picks(mobile=${mobilePick?.id},laptop=${laptopPick?.id}), ErrorsClassified=true`,
+      };
+    },
+  },
+
+  {
+    name: 'Rule 54: Supabase env resolution supports PUBLISHABLE_KEY, ANON_KEY, swapped URL/key recovery, and blocks service_role in any slot',
+    run: async () => {
+      const legacyOnly = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: 'https://proj123.supabase.co',
+        VITE_SUPABASE_ANON_KEY: 'legacy_anon_key_valid_123456',
+      });
+
+      const swappedWithAnonSlot = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: 'sb_publishable_abcdefghijklmnopqrstuvwxyz123456',
+        VITE_SUPABASE_ANON_KEY: 'https://proj123.supabase.co',
+      });
+
+      const swappedWithPublishableSlot = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: 'sb_publishable_abcdefghijklmnopqrstuvwxyz123456',
+        VITE_SUPABASE_PUBLISHABLE_KEY: 'https://proj123.supabase.co',
+      });
+
+      const fakeServiceJwt = Buffer.from(JSON.stringify({ role: 'service_role', ref: 'abc' })).toString('base64url');
+      const swappedServiceRoleBlocked = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: `eyJhbGciOiJIUzI1NiJ9.${fakeServiceJwt}.sig`,
+        VITE_SUPABASE_ANON_KEY: 'https://proj123.supabase.co',
+      });
+
+      const secretInUrlSlotBlocked = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: 'sb_secret_supersecret_key_value_123',
+        VITE_SUPABASE_PUBLISHABLE_KEY: 'https://proj123.supabase.co',
+      });
+
+      const invalidUrlStillRejected = resolveSupabaseEnv({
+        VITE_SUPABASE_URL: 'http://insecure.supabase.co',
+        VITE_SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_valid_key_12345',
+      });
+
+      const passed =
+        legacyOnly.isConfigured &&
+        legacyOnly.keySource === 'VITE_SUPABASE_ANON_KEY' &&
+        !legacyOnly.swappedEnvDetected &&
+        swappedWithAnonSlot.isConfigured &&
+        swappedWithAnonSlot.url === 'https://proj123.supabase.co' &&
+        swappedWithAnonSlot.anonKey === 'sb_publishable_abcdefghijklmnopqrstuvwxyz123456' &&
+        swappedWithAnonSlot.swappedEnvDetected === true &&
+        swappedWithAnonSlot.projectId === 'proj123' &&
+        swappedWithPublishableSlot.isConfigured &&
+        swappedWithPublishableSlot.url === 'https://proj123.supabase.co' &&
+        swappedWithPublishableSlot.anonKey === 'sb_publishable_abcdefghijklmnopqrstuvwxyz123456' &&
+        swappedWithPublishableSlot.swappedEnvDetected === true &&
+        !swappedServiceRoleBlocked.isConfigured &&
+        Boolean(swappedServiceRoleBlocked.errorMessage?.includes('Security block')) &&
+        !secretInUrlSlotBlocked.isConfigured &&
+        Boolean(secretInUrlSlotBlocked.errorMessage?.includes('Security block')) &&
+        !invalidUrlStillRejected.isConfigured &&
+        Boolean(invalidUrlStillRejected.errorMessage?.includes('VITE_SUPABASE_URL'));
+
+      return {
+        passed,
+        message: `Legacy=${legacyOnly.isConfigured}, SwappedAnon=${swappedWithAnonSlot.isConfigured}, SwappedPub=${swappedWithPublishableSlot.isConfigured}, ServiceRoleSwappedBlocked=${!swappedServiceRoleBlocked.isConfigured && !secretInUrlSlotBlocked.isConfigured}, InvalidUrlBlocked=${!invalidUrlStillRejected.isConfigured}`,
       };
     },
   },

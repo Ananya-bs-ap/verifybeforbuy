@@ -325,25 +325,40 @@ export class ApiService {
     model?: string;
     fallbackReason?: string;
   }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 35_000);
+
     try {
       const response = await fetch('/api/explain', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(result),
+        signal: controller.signal,
       });
 
       if (response.ok) {
         return await response.json();
       }
+      const errBody = await response.json().catch(() => ({}));
+      return {
+        explanation:
+          `Based on the calculated risk score of ${result.score}/100 (${result.category.toUpperCase()} risk), this assessment evaluates observable signals against known risk indicators. ${result.summary} Note: risk assessment is a probability and caution index, not physical proof of authenticity or fraud. Always verify official seller channels and use payment methods with buyer dispute protection.`,
+        provider: 'deterministic-fallback',
+        fallbackReason: errBody?.error || `Explanation service returned HTTP ${response.status}`,
+      };
     } catch (err: any) {
-      console.warn('AI explanation API error:', err.message);
+      const isAbort = err?.name === 'AbortError';
+      console.warn('AI explanation API error:', err?.message || err);
+      return {
+        explanation:
+          `Based on the calculated risk score of ${result.score}/100 (${result.category.toUpperCase()} risk), this assessment evaluates observable signals against known risk indicators. ${result.summary} Note: risk assessment is a probability and caution index, not physical proof of authenticity or fraud. Always verify official seller channels and use payment methods with buyer dispute protection.`,
+        provider: 'deterministic-fallback',
+        fallbackReason: isAbort
+          ? 'Request to /api/explain timed out in browser'
+          : 'Backend /api/explain endpoint unreachable; client fallback displayed',
+      };
+    } finally {
+      clearTimeout(timer);
     }
-
-    return {
-      explanation:
-        `Based on the calculated risk score of ${result.score}/100 (${result.category.toUpperCase()} risk), this assessment evaluates observable signals against known risk indicators. A low price, unknown domain, or missing record requires diligence, but risk assessment is not physical proof of counterfeiting or fraud. Always verify return terms and use payment methods with buyer dispute protection.`,
-      provider: 'deterministic-fallback',
-      fallbackReason: 'Backend /api/explain endpoint unreachable; client fallback displayed',
-    };
   }
 }

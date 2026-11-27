@@ -1791,14 +1791,20 @@ Disclaimer: ${result.disclaimer}`;
             )}
           </div>
 
-          {!aiExplanation && (
+          {(!aiExplanation || aiProvider === 'deterministic-fallback') && (
             <button
               onClick={handleGenerateAiExplanation}
               disabled={isExplaining}
               className="flex items-center gap-2 px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors disabled:opacity-50 shadow-sm"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>{isExplaining ? 'Analyzing...' : 'Generate AI Explanation'}</span>
+              <span>
+                {isExplaining
+                  ? 'Analyzing...'
+                  : aiProvider === 'deterministic-fallback'
+                    ? 'Retry Gemini AI'
+                    : 'Generate AI Explanation'}
+              </span>
             </button>
           )}
         </div>

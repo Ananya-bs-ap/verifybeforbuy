@@ -88,13 +88,31 @@ export function isPrivilegedSupabaseKey(key: string): boolean {
   return false;
 }
 
+function looksLikePublicSupabaseKey(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length <= 10) return false;
+  if (trimmed.includes('://')) return false;
+  if (
+    trimmed.includes('your-anon-key') ||
+    trimmed.includes('your-publishable-key') ||
+    trimmed.includes('your-supabase-url')
+  ) {
+    return false;
+  }
+  if (isPrivilegedSupabaseKey(trimmed)) return false;
+  if (trimmed.startsWith('sb_publishable_')) return true;
+  if (trimmed.split('.').length === 3) return true;
+  return trimmed.length >= 20 && !/\s/.test(trimmed);
+}
+
 export interface SupabaseEnvResolution {
   url: string;
   anonKey: string;
-  keySource?: 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'VITE_SUPABASE_ANON_KEY';
+  keySource?: 'VITE_SUPABASE_PUBLISHABLE_KEY' | 'VITE_SUPABASE_ANON_KEY' | 'VITE_SUPABASE_URL';
   urlConfigured: boolean;
   anonKeyConfigured: boolean;
   isConfigured: boolean;
+  swappedEnvDetected?: boolean;
   projectId?: string;
   errorMessage?: string;
 }
@@ -104,41 +122,86 @@ export function resolveSupabaseEnv(envOverride?: Record<string, string | undefin
   const rawUrl = (env.VITE_SUPABASE_URL || '').trim();
   const publishableKey = (env.VITE_SUPABASE_PUBLISHABLE_KEY || '').trim();
   const legacyAnonKey = (env.VITE_SUPABASE_ANON_KEY || '').trim();
-  const rawKey = publishableKey || legacyAnonKey;
-  const keySource = publishableKey
-    ? 'VITE_SUPABASE_PUBLISHABLE_KEY'
-    : legacyAnonKey
-      ? 'VITE_SUPABASE_ANON_KEY'
-      : undefined;
 
-  const urlConfigured = isValidSupabaseUrl(rawUrl);
-  const keyPresent =
-    rawKey.length > 10 &&
-    !rawKey.includes('your-anon-key') &&
-    !rawKey.includes('your-publishable-key');
-  const privilegedBlocked = keyPresent && isPrivilegedSupabaseKey(rawKey);
-  const anonKeyConfigured = keyPresent && !privilegedBlocked;
+  // Security check across ALL configured Supabase variables first
+  const privilegedBlocked = [rawUrl, publishableKey, legacyAnonKey].some(
+    (candidate) => candidate.length > 10 && isPrivilegedSupabaseKey(candidate)
+  );
+
+  if (privilegedBlocked) {
+    return {
+      url: '',
+      anonKey: '',
+      keySource: undefined,
+      urlConfigured: isValidSupabaseUrl(rawUrl),
+      anonKeyConfigured: false,
+      isConfigured: false,
+      errorMessage:
+        'Security block: Do not use a Supabase service_role or sb_secret key in browser variables. Use VITE_SUPABASE_PUBLISHABLE_KEY (or the public anon key) only.',
+    };
+  }
+
+  let resolvedUrl = rawUrl;
+  let resolvedKey = '';
+  let keySource: SupabaseEnvResolution['keySource'];
+  let swappedEnvDetected = false;
+
+  if (isValidSupabaseUrl(rawUrl)) {
+    if (looksLikePublicSupabaseKey(publishableKey)) {
+      resolvedKey = publishableKey;
+      keySource = 'VITE_SUPABASE_PUBLISHABLE_KEY';
+    } else if (looksLikePublicSupabaseKey(legacyAnonKey)) {
+      resolvedKey = legacyAnonKey;
+      keySource = 'VITE_SUPABASE_ANON_KEY';
+    }
+  } else if (looksLikePublicSupabaseKey(rawUrl)) {
+    // Recover cleanly if Secrets were entered swapped (e.g. URL placed in ANON/PUBLISHABLE slot and key in URL slot)
+    const swappedUrlCandidate = isValidSupabaseUrl(publishableKey)
+      ? publishableKey
+      : isValidSupabaseUrl(legacyAnonKey)
+        ? legacyAnonKey
+        : '';
+    if (swappedUrlCandidate) {
+      resolvedUrl = swappedUrlCandidate;
+      swappedEnvDetected = true;
+      if (!isValidSupabaseUrl(publishableKey) && looksLikePublicSupabaseKey(publishableKey)) {
+        resolvedKey = publishableKey;
+        keySource = 'VITE_SUPABASE_PUBLISHABLE_KEY';
+      } else {
+        resolvedKey = rawUrl;
+        keySource = 'VITE_SUPABASE_URL';
+      }
+    }
+  } else {
+    resolvedKey = publishableKey || legacyAnonKey;
+    keySource = publishableKey
+      ? 'VITE_SUPABASE_PUBLISHABLE_KEY'
+      : legacyAnonKey
+        ? 'VITE_SUPABASE_ANON_KEY'
+        : undefined;
+  }
+
+  const urlConfigured = isValidSupabaseUrl(resolvedUrl);
+  const anonKeyConfigured = looksLikePublicSupabaseKey(resolvedKey);
 
   let errorMessage: string | undefined;
   if (rawUrl && !urlConfigured) {
     errorMessage = 'VITE_SUPABASE_URL is not a valid https:// Supabase URL.';
-  } else if (privilegedBlocked) {
-    errorMessage =
-      'Security block: Do not use a Supabase service_role or sb_secret key in browser variables. Use VITE_SUPABASE_PUBLISHABLE_KEY (or the public anon key) only.';
-  } else if ((rawUrl && !anonKeyConfigured) || (!rawUrl && anonKeyConfigured)) {
+  } else if ((resolvedUrl && !anonKeyConfigured) || (!resolvedUrl && anonKeyConfigured)) {
     errorMessage =
       'Both VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY (or VITE_SUPABASE_ANON_KEY) must be configured together.';
   }
 
   const isConfigured = urlConfigured && anonKeyConfigured;
   return {
-    url: isConfigured ? rawUrl : '',
-    anonKey: isConfigured ? rawKey : '',
+    url: isConfigured ? resolvedUrl : '',
+    anonKey: isConfigured ? resolvedKey : '',
     keySource: isConfigured ? keySource : undefined,
     urlConfigured,
     anonKeyConfigured,
     isConfigured,
-    projectId: isConfigured ? extractSupabaseProjectId(rawUrl) : undefined,
+    swappedEnvDetected: isConfigured && swappedEnvDetected ? true : undefined,
+    projectId: isConfigured ? extractSupabaseProjectId(resolvedUrl) : undefined,
     errorMessage,
   };
 }
